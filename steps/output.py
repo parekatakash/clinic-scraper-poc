@@ -45,18 +45,24 @@ def _build_report(data: dict) -> str:
         for i, p in enumerate(providers, 1):
             lines.append(f"{i}. {p.get('name', 'Unknown')}")
             if p.get("title"):
-                lines.append(f"   Title     : {p['title']}")
+                lines.append(f"   Title           : {p['title']}")
             if p.get("specialty"):
-                lines.append(f"   Specialty : {p['specialty']}")
+                lines.append(f"   Specialty       : {p['specialty']}")
+            if p.get("current_employer"):
+                lines.append(f"   Current Employer: {p['current_employer']}")
+            if p.get("license_states"):
+                states = ", ".join(p["license_states"]) if isinstance(p["license_states"], list) else p["license_states"]
+                lines.append(f"   Licensed In     : {states}")
             if p.get("phone"):
-                lines.append(f"   Phone     : {p['phone']}")
+                lines.append(f"   Phone           : {p['phone']}")
             if p.get("email"):
-                lines.append(f"   Email     : {p['email']}")
+                lines.append(f"   Email           : {p['email']}")
             lines.append("")
 
     lines.append("-" * 40)
     usage = data.get("_usage", {})
-    lines.append(f"Source  : {data.get('_source_url', 'N/A')}")
+    source = data.get("_source_url") or data.get("_source") or "N/A"
+    lines.append(f"Source  : {source}")
     lines.append(f"Tokens  : {usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out")
     lines.append("=" * 60)
 

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from steps import extract_providers, save_json, save_report, scrape_clinic, search_clinic_website
+from steps import extract_providers, lookup_npi, save_json, save_report, scrape_clinic, search_clinic_website
 
 _ADDRESS_RE = re.compile(
     r"^(?P<street>.+?),\s*(?P<city>[^,]+),\s*(?P<state>[A-Z]{2})\s+(?P<postal>\d{5}(?:-\d{4})?)$"
@@ -36,6 +36,24 @@ def _parse_address(raw: str) -> tuple[str, str, str, str]:
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _address_matches(extracted: dict, street: str, postal: str) -> bool:
+    """Check if extracted clinic address is close enough to the input address."""
+    extracted_addr = (extracted.get("address") or "").lower()
+    if not extracted_addr:
+        return True  # Can't verify — let it pass
+
+    # Match on postal code (most reliable)
+    if postal[:5] in extracted_addr:
+        return True
+
+    # Match on first word of street number/name (e.g. "121" from "121 S Crescent Dr")
+    street_token = street.strip().split()[0].lower()
+    if street_token and street_token in extracted_addr:
+        return True
+
+    return False
 
 
 def main() -> None:
@@ -72,27 +90,49 @@ def main() -> None:
 
     print("[1/4] Searching for clinic website...")
     url = search_clinic_website(name, full_address, state, postal)
+    use_npi_fallback = False
+
     if not url:
-        print("ERROR: Could not find a website for this clinic. Exiting.")
-        sys.exit(1)
-    print(f"      Found: {url}")
+        print("      No website found — will use NPI Registry fallback.")
+        use_npi_fallback = True
+    else:
+        print(f"      Found: {url}")
 
-    print("[2/4] Scraping website...")
-    scraped = scrape_clinic(url)
-    print(f"      Pages scraped: {len(scraped['pages'])}")
-    for p in scraped["pages"]:
-        print(f"        • {p}")
+    if not use_npi_fallback:
+        print("[2/4] Scraping website...")
+        scraped = scrape_clinic(url)
+        print(f"      Pages scraped: {len(scraped['pages'])}")
+        for p in scraped["pages"]:
+            print(f"        • {p}")
 
-    if not scraped["pages"]:
-        print("ERROR: Could not scrape any pages (site may be blocking bots). Exiting.")
-        sys.exit(1)
+        if not scraped["pages"]:
+            print("      Site blocked scraping — falling back to NPI Registry.")
+            use_npi_fallback = True
 
-    print("[3/4] Extracting providers via Claude NER...")
-    data = extract_providers(scraped["text"], url)
-    provider_count = len(data.get("providers", []))
-    print(f"      Providers extracted: {provider_count}")
-    usage = data.get("_usage", {})
-    print(f"      Tokens used: {usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out")
+    if not use_npi_fallback:
+        print("[3/4] Extracting providers via Claude NER...")
+        data = extract_providers(scraped["text"], url)
+        provider_count = len(data.get("providers", []))
+        print(f"      Providers extracted: {provider_count}")
+        usage = data.get("_usage", {})
+        print(f"      Tokens used: {usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out")
+
+        if provider_count == 0:
+            print("      No providers found on website — falling back to NPI Registry.")
+            use_npi_fallback = True
+        elif not _address_matches(data, street, postal):
+            print(f"      Address mismatch (got: {data.get('address')}) — falling back to NPI Registry.")
+            use_npi_fallback = True
+
+    if use_npi_fallback:
+        print("[NPI] Looking up providers in CMS NPI Registry...")
+        data = lookup_npi(name, full_address, state, postal)
+        provider_count = len(data.get("providers", []))
+        print(f"      Providers found: {provider_count}")
+        if provider_count == 0:
+            print("      No providers found in NPI Registry either. Saving empty result.")
+        else:
+            print(f"      Source: {data.get('_source')}")
 
     print("[4/4] Saving results...")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

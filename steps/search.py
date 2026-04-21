@@ -4,8 +4,11 @@ import requests
 
 def search_clinic_website(clinic_name: str | None, address: str, state: str, postal_code: str) -> str | None:
     """Search for the clinic's official website. Tries Serper first, falls back to DuckDuckGo."""
-    name_part = f"{clinic_name} " if clinic_name else ""
-    query = f"{name_part}{address} {state} {postal_code} clinic official website"
+    if clinic_name:
+        query = f"{clinic_name} {address} {state} {postal_code} official website"
+    else:
+        # Quoted address forces exact street match
+        query = f'"{address}" {state} {postal_code} clinic'
     url = _serper_search(query) or _duckduckgo_search(query)
     return url
 

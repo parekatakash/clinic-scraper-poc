@@ -49,7 +49,7 @@ def _fetch_text(session: requests.Session, url: str) -> str | None:
     try:
         resp = session.get(url, timeout=15, allow_redirects=True)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "noscript", "head"]):
             tag.decompose()
         return soup.get_text(separator=" ", strip=True)
@@ -65,7 +65,7 @@ def _find_staff_links(session: requests.Session, base_url: str) -> list[str]:
     try:
         resp = session.get(base_url, timeout=15)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", href=True):
             href: str = a["href"].lower()
             text: str = a.get_text(strip=True).lower()

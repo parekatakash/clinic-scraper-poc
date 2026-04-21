@@ -24,15 +24,19 @@ Return a JSON object with this exact structure:
       "name": "string",
       "title": "string or null",
       "specialty": "string or null",
+      "current_employer": "string or null",
       "phone": "string or null",
-      "email": "string or null"
+      "email": "string or null",
+      "license_states": ["list of US state abbreviations where license is mentioned, e.g. CO, CA"]
     }}
   ]
 }}
 
 Rules:
 - Include every named provider/doctor/staff member you can find.
-- Use null for any field that is not present in the text.
+- Use null for any field not present in the text. Use [] for license_states if none mentioned.
+- For current_employer: capture the hospital, clinic, or organization the provider currently works at. If the whole page is for one clinic, use that clinic name as the employer.
+- For license_states: look for phrases like "licensed in", "board certified in [state]", "practicing in [state]", or any explicit state license mention. Use two-letter state abbreviations.
 - Normalise phone numbers to (XXX) XXX-XXXX format when possible.
 - Do not invent or infer data that is not explicitly in the text.
 
