@@ -111,7 +111,6 @@ def _parse_result(r: dict) -> dict:
     employer = None
     raw_address = None
     phone = None
-    license_states = []
 
     if practice:
         employer = practice.get("organization_name") or None
@@ -123,11 +122,16 @@ def _parse_result(r: dict) -> dict:
         phone_raw = practice.get("telephone_number", "")
         phone = _format_phone(phone_raw)
 
-    # Collect all states from addresses as proxy for license states
-    for addr in addresses:
-        s = addr.get("state", "")
-        if s and s not in license_states:
-            license_states.append(s)
+    # Extract license states AND license numbers directly from taxonomy records
+    license_states = []
+    license_number = None
+    for t in taxonomies:
+        t_state = t.get("state", "").strip()
+        t_license = t.get("license", "").strip()
+        if t_state and t_state not in license_states:
+            license_states.append(t_state)
+        if t_license and not license_number:
+            license_number = t_license
 
     return {
         "name": name,
@@ -137,6 +141,7 @@ def _parse_result(r: dict) -> dict:
         "phone": phone,
         "email": None,
         "license_states": license_states,
+        "license_number": license_number,
         "npi": r.get("number"),
         "_raw_address": raw_address,
     }

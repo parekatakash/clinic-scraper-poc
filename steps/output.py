@@ -43,13 +43,19 @@ def _build_report(data: dict) -> str:
         lines.append("No providers found.")
     else:
         for i, p in enumerate(providers, 1):
-            lines.append(f"{i}. {p.get('name', 'Unknown')}")
+            in_state = p.get("licensed_in_target_state")
+            badge = "[LICENSED]" if in_state is True else ("[NOT VERIFIED]" if in_state is False else "")
+            lines.append(f"{i}. {p.get('name', 'Unknown')}  {badge}")
+            if p.get("npi"):
+                lines.append(f"   NPI             : {p['npi']}")
             if p.get("title"):
                 lines.append(f"   Title           : {p['title']}")
             if p.get("specialty"):
                 lines.append(f"   Specialty       : {p['specialty']}")
             if p.get("current_employer"):
                 lines.append(f"   Current Employer: {p['current_employer']}")
+            if p.get("license_number"):
+                lines.append(f"   License No.     : {p['license_number']}")
             if p.get("license_states"):
                 states = ", ".join(p["license_states"]) if isinstance(p["license_states"], list) else p["license_states"]
                 lines.append(f"   Licensed In     : {states}")
@@ -63,7 +69,11 @@ def _build_report(data: dict) -> str:
     usage = data.get("_usage", {})
     source = data.get("_source_url") or data.get("_source") or "N/A"
     lines.append(f"Source  : {source}")
-    lines.append(f"Tokens  : {usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out")
+    if usage:
+        lines.append(f"Tokens  : {usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out")
+    fda = data.get("fda_registration", {})
+    if fda:
+        lines.append(f"FDA Reg : {'Registered' if fda.get('fda_registered') else 'Not found in FDA CDRH database'}")
     lines.append("=" * 60)
 
     return "\n".join(lines)
