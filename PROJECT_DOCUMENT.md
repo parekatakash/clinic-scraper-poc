@@ -219,9 +219,10 @@ Enriches each provider with authoritative license data from three sources:
 - **Register free at:** https://developer.fsmb.org
 - Gracefully skipped if credentials are not set
 
-#### 2. NPI Registry taxonomy (fallback)
-- License states and license numbers already attached from `npi.py`
-- Used when FSMB credentials are not configured
+#### 2. NPI Registry — license data fallback (three-tier)
+- **Tier 1 (NPI path):** When the tool falls back to the NPI Registry for provider discovery, license states and numbers come from NPI taxonomy fields already on the record.
+- **Tier 2 (live name lookup):** When a provider came from website scraping (no NPI taxonomy), and FSMB is also unavailable, a live NPI name search is performed automatically to fill in `license_states`, `license_number`, and `npi` number. This ensures license data is always populated regardless of which discovery path was used.
+- NPI national retry: if a state-scoped search returns nothing, retries without state filter.
 
 #### 3. FDA CDRH Establishment Registry
 - Checks if the clinic is registered as a medical device establishment
@@ -307,6 +308,7 @@ Without FSMB credentials the tool still works — license states come from NPI t
 | NPI name search returns nothing | Retries without state restriction |
 | NPI address search finds no street match | Returns empty — no ZIP dump |
 | FSMB credentials not set | License states from NPI taxonomy only |
+| Provider from website with no license data + FSMB unavailable | Live NPI name lookup fills license states and number |
 | Provider has no `licensed_in_target_state` (address-only mode) | Excluded from results |
 | Website returns markdown-wrapped JSON | Fences stripped automatically |
 | Very large website | Text truncated at 100,000 characters |
@@ -315,6 +317,33 @@ Without FSMB credentials the tool still works — license states come from NPI t
 
 ## 11. Sample Terminal Output
 
+**Name + Address mode** (finds a specific provider, returns full license info):
+```
+=== Clinic Scraper ===
+Target : Dr. Abner Fernandez, 121 S Crescent Dr Ste B, Pueblo, CO 81003
+Mode   : Name + Address (full license lookup)
+
+[1/5] Searching for clinic website...
+      Found: https://www.uchealth.org/provider/abner-fernandez-md/
+[2/5] Scraping website...
+      Pages scraped: 2
+        • https://www.uchealth.org/provider/abner-fernandez-md/
+        • https://www.uchealth.org/provider/
+[3/5] Extracting providers via Claude NER...
+      Providers extracted: 1
+      Tokens used: 2059 in / 186 out
+[4/5] Verifying licenses...
+      Licensed in CO: 1 / 1 provider(s)
+      Checking FDA establishment registry for 'UCHealth Family Medicine - Parkview Pueblo West'...
+      FDA status: Not found
+[5/5] Saving results...
+[output] Saved JSON   → /path/to/output/dr_abner_fernandez_20260421.json
+[output] Saved Report → /path/to/output/dr_abner_fernandez_20260421.txt
+
+Done. Results saved to /path/to/output
+```
+
+**Address-only mode** (returns all licensed providers at that location, with NPI fallback):
 ```
 === Clinic Scraper ===
 Target : Unknown Clinic, 121 S Crescent Dr Ste B, Pueblo, CO 81003
