@@ -44,7 +44,7 @@ _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn",
 def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]:
     """
     Enrich each provider with license verification data.
-    Tries FSMB MED API first, falls back to NPI taxonomy already on the record.
+    Priority: FSMB MED API → NPI taxonomy on record → NPI name lookup fallback.
     """
     use_fsmb = bool(os.getenv("FSMB_CLIENT_ID") and os.getenv("FSMB_CLIENT_SECRET"))
     enriched = []
@@ -61,19 +61,32 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
         if use_fsmb:
             fsmb_data = _fsmb_lookup(name, target_state)
 
-        # Merge license states from NPI (already on record) + FSMB
+        # Merge license states: NPI taxonomy already on record + FSMB result
         existing = set(p.get("license_states") or [])
         fsmb_states = set(fsmb_data.get("license_states") or [])
         merged_states = sorted(existing | fsmb_states)
 
+        # If still no license data, do a live NPI name lookup as last resort
+        # (happens when provider came from website scraping, not NPI fallback)
+        npi_fallback = {}
+        if not merged_states and not fsmb_data.get("license_number"):
+            npi_fallback = _npi_license_lookup(name, target_state)
+            npi_states = set(npi_fallback.get("license_states") or [])
+            merged_states = sorted(existing | fsmb_states | npi_states)
+
         updated["license_states"] = merged_states
         updated["license_number"] = (
             fsmb_data.get("license_number")
+            or npi_fallback.get("license_number")
             or p.get("license_number")
         )
-        updated["license_status"] = fsmb_data.get("license_status")  # Active / Inactive / None
+        updated["license_status"] = fsmb_data.get("license_status")
         updated["board_actions"] = fsmb_data.get("board_actions", [])
-        updated["npi"] = fsmb_data.get("npi") or p.get("npi")
+        updated["npi"] = (
+            fsmb_data.get("npi")
+            or npi_fallback.get("npi")
+            or p.get("npi")
+        )
         updated["licensed_in_target_state"] = target_state in merged_states
 
         # State board URL for manual verification
@@ -304,6 +317,71 @@ def _parse_fsmb_result(
         "license_status": license_status,
         "board_actions": board_actions,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NPI name lookup — fallback when provider came from website (no NPI taxonomy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_NPI_API = "https://npiregistry.cms.hhs.gov/api/"
+
+
+def _npi_license_lookup(full_name: str, state: str) -> dict:
+    """Quick NPI name search to retrieve license states + NPI number."""
+    parts = [p for p in full_name.strip().split() if p.lower().strip(".,") not in _TITLE_WORDS]
+    if len(parts) < 2:
+        return {}
+    try:
+        resp = requests.get(
+            _NPI_API,
+            params={
+                "version": "2.1",
+                "enumeration_type": "NPI-1",
+                "first_name": parts[0],
+                "last_name": parts[-1],
+                "state": state,
+                "limit": 5,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            # Retry nationally
+            resp2 = requests.get(
+                _NPI_API,
+                params={
+                    "version": "2.1",
+                    "enumeration_type": "NPI-1",
+                    "first_name": parts[0],
+                    "last_name": parts[-1],
+                    "limit": 5,
+                },
+                timeout=10,
+            )
+            resp2.raise_for_status()
+            results = resp2.json().get("results", [])
+        if not results:
+            return {}
+        r = results[0]
+        taxonomies = r.get("taxonomies", [])
+        license_states = []
+        license_number = None
+        for t in taxonomies:
+            t_state = t.get("state", "").strip()
+            t_license = t.get("license", "").strip()
+            if t_state and t_state not in license_states:
+                license_states.append(t_state)
+            if t_license and not license_number:
+                license_number = t_license
+        return {
+            "npi": r.get("number"),
+            "license_states": license_states,
+            "license_number": license_number,
+        }
+    except Exception as e:
+        print(f"[license] NPI fallback lookup error for '{full_name}': {e}")
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
