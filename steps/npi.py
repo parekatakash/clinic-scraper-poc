@@ -95,19 +95,30 @@ def _search_by_location(street: str, state: str, postal_code: str) -> list[dict]
     return []
 
 
+_DIRECTIONALS = {"N", "S", "E", "W", "NE", "NW", "SE", "SW", "NORTH", "SOUTH", "EAST", "WEST"}
+_SUFFIXES = {"ST", "AVE", "BLVD", "DR", "RD", "LN", "CT", "PL", "WAY", "CIR", "STE", "APT", "UNIT", "FL", "FLOOR"}
+
+
 def _filter_by_street(providers: list[dict], street: str) -> list[dict]:
-    """Keep providers whose practice address contains the input street number or name."""
+    """Keep providers whose practice address matches the input street number + street name."""
     if not street:
         return providers
 
-    # Normalise: uppercase, strip suite/unit suffixes for comparison
     def normalise(s: str) -> str:
         return s.upper().replace(".", "").replace(",", "")
 
-    norm_input = normalise(street)
-    # Key tokens: street number + first word of street name (e.g. "121", "CRESCENT")
-    tokens = norm_input.split()
-    key_tokens = tokens[:2] if len(tokens) >= 2 else tokens
+    tokens = normalise(street).split()
+    # Street number is always first token (e.g. "121")
+    street_number = tokens[0] if tokens else ""
+    # Street name = first token that is not a number, directional, or suffix
+    street_name = next(
+        (t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _SUFFIXES and not t.isdigit() and len(t) > 1),
+        ""
+    )
+    key_tokens = [t for t in [street_number, street_name] if t]
+
+    if not key_tokens:
+        return providers
 
     matched = []
     for p in providers:
