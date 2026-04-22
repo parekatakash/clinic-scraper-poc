@@ -206,11 +206,16 @@ Queries the CMS NPI Registry (free, no API key needed).
 
 Enriches each provider with authoritative license data from three sources:
 
-#### 1. FSMB MED API (DocInfo — primary source)
-- Official API of the Federation of State Medical Boards
-- Returns: license status (Active/Inactive/Expired), license number, board actions/disciplinary history
+#### 1. FSMB MED API / DocInfo (primary source)
+- Official API of the Federation of State Medical Boards — the same backend that powers https://www.docinfo.org/
+- **Two-step lookup (mirrors docinfo.org):**
+  1. `GET /v2/practitioners/search` — search by first/last name, returns practitioners + FID (Federation ID)
+  2. `GET /v2/licensure/{fid}/summary` — full license list with status per state (Active/Inactive/Expired)
+  3. `GET /v2/practitioners/{fid}/verification` — board orders and disciplinary history
+- OAuth2 scopes requested: `med.read med.order_read`
 - Uses OAuth2 client credentials (`FSMB_CLIENT_ID` + `FSMB_CLIENT_SECRET`)
 - Token is cached in memory and auto-refreshed
+- Falls back to search-result embedded data if FID endpoints return non-200
 - **Register free at:** https://developer.fsmb.org
 - Gracefully skipped if credentials are not set
 

@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 # ── FSMB MED API ─────────────────────────────────────────────────────────────
 _FSMB_TOKEN_URL = "https://identity.fsmb.org/connect/token"
 _FSMB_SEARCH_URL = "https://services-med.fsmb.org/v2/practitioners/search"
+_FSMB_LICENSURE_URL = "https://services-med.fsmb.org/v2/licensure/{fid}/summary"
+_FSMB_VERIFICATION_URL = "https://services-med.fsmb.org/v2/practitioners/{fid}/verification"
 _FSMB_TOKEN_CACHE: dict = {}   # {token: str, expires_at: float}
 
 # ── State medical board lookup URLs (HTML-based, no JS required) ──────────────
@@ -123,7 +125,7 @@ def _fsmb_token() -> str | None:
                 "grant_type": "client_credentials",
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "scope": "med.read",
+                "scope": "med.read med.order_read",
             },
             timeout=10,
         )
@@ -138,7 +140,12 @@ def _fsmb_token() -> str | None:
 
 
 def _fsmb_lookup(full_name: str, state: str) -> dict:
-    """Query FSMB MED API for a provider's license info."""
+    """
+    Two-step FSMB lookup (mirrors what docinfo.org does):
+      1. Search by name → get FID
+      2. Fetch licensure summary + verification using FID
+    Falls back to search result data if FID endpoints fail.
+    """
     token = _fsmb_token()
     if not token:
         return {}
@@ -147,28 +154,77 @@ def _fsmb_lookup(full_name: str, state: str) -> dict:
     if len(parts) < 2:
         return {}
 
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    # Step 1 — search by name to get practitioners + FID
     try:
         resp = requests.get(
             _FSMB_SEARCH_URL,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            params={
-                "name.firstName": parts[0],
-                "name.lastName": parts[-1],
-            },
+            headers=headers,
+            params={"name.firstName": parts[0], "name.lastName": parts[-1]},
             timeout=15,
         )
         if resp.status_code == 404:
             return {}
         resp.raise_for_status()
-        results = resp.json().get("practitioners", []) or resp.json().get("items", []) or [resp.json()]
-        return _parse_fsmb_result(results, state)
+        body = resp.json()
+        results = body.get("practitioners") or body.get("items") or ([body] if body.get("fid") else [])
     except Exception as e:
         print(f"[license] FSMB search error for '{full_name}': {e}")
         return {}
 
+    if not results:
+        return {}
 
-def _parse_fsmb_result(results: list, target_state: str) -> dict:
-    """Extract license info from FSMB API response."""
+    # Extract FID from the best-matching practitioner
+    fid = None
+    for r in results:
+        fid = r.get("fid") or r.get("id")
+        if fid:
+            break
+
+    # Step 2 — fetch richer data via FID endpoints when available
+    licensure_data: dict = {}
+    verification_data: dict = {}
+
+    if fid:
+        try:
+            lic_resp = requests.get(
+                _FSMB_LICENSURE_URL.format(fid=fid),
+                headers=headers,
+                timeout=15,
+            )
+            if lic_resp.status_code == 200:
+                licensure_data = lic_resp.json()
+        except Exception as e:
+            print(f"[license] FSMB licensure summary error for FID {fid}: {e}")
+
+        try:
+            ver_resp = requests.get(
+                _FSMB_VERIFICATION_URL.format(fid=fid),
+                headers=headers,
+                timeout=15,
+            )
+            if ver_resp.status_code == 200:
+                verification_data = ver_resp.json()
+        except Exception as e:
+            print(f"[license] FSMB verification error for FID {fid}: {e}")
+
+    # Parse — prefer FID-based data, fall back to search result data
+    return _parse_fsmb_result(results, state, licensure_data, verification_data)
+
+
+def _parse_fsmb_result(
+    results: list,
+    target_state: str,
+    licensure_data: dict | None = None,
+    verification_data: dict | None = None,
+) -> dict:
+    """
+    Extract license info from FSMB API responses.
+    Prefers FID-based licensure_data/verification_data when available;
+    falls back to the search result records.
+    """
     if not results:
         return {}
 
@@ -178,29 +234,68 @@ def _parse_fsmb_result(results: list, target_state: str) -> dict:
     board_actions = []
     npi = None
 
+    # ── Pull NPI from search results ─────────────────────────────────────────
     for practitioner in results:
-        # NPI
         ids = practitioner.get("ids", []) or []
         for id_rec in ids:
             if id_rec.get("type", "").upper() == "NPI" and not npi:
                 npi = id_rec.get("value")
 
-        # Licenses
-        licenses = practitioner.get("licenses", []) or []
-        for lic in licenses:
-            state = lic.get("state", "").upper()
+    # ── License states + status from FID licensure summary (richest source) ──
+    if licensure_data:
+        for lic in licensure_data.get("licenses", []) or []:
+            state = (lic.get("state") or lic.get("licenseState") or "").upper()
             if state and state not in license_states:
                 license_states.append(state)
             if state == target_state:
-                license_number = lic.get("licenseNumber") or license_number
-                license_status = lic.get("status") or license_status
+                license_number = lic.get("licenseNumber") or lic.get("number") or license_number
+                license_status = lic.get("status") or lic.get("licenseStatus") or license_status
+        # Some FSMB responses wrap licenses differently
+        for lic in licensure_data.get("licensures", []) or []:
+            state = (lic.get("state") or lic.get("licenseState") or "").upper()
+            if state and state not in license_states:
+                license_states.append(state)
+            if state == target_state:
+                license_number = lic.get("licenseNumber") or lic.get("number") or license_number
+                license_status = lic.get("status") or lic.get("licenseStatus") or license_status
+    else:
+        # Fall back to license data embedded in search results
+        for practitioner in results:
+            for lic in practitioner.get("licenses", []) or []:
+                state = (lic.get("state") or "").upper()
+                if state and state not in license_states:
+                    license_states.append(state)
+                if state == target_state:
+                    license_number = lic.get("licenseNumber") or license_number
+                    license_status = lic.get("status") or license_status
 
-        # Board actions / disciplinary
-        actions = practitioner.get("boardActions", []) or []
-        for action in actions:
-            desc = action.get("category") or action.get("actionType") or str(action)
+    # ── Board actions from FID verification endpoint (most authoritative) ────
+    if verification_data:
+        for action in verification_data.get("boardOrders", []) or []:
+            desc = (
+                action.get("actionType")
+                or action.get("category")
+                or action.get("description")
+                or str(action)
+            )
             if desc and desc not in board_actions:
                 board_actions.append(desc)
+        for action in verification_data.get("boardActions", []) or []:
+            desc = (
+                action.get("actionType")
+                or action.get("category")
+                or action.get("description")
+                or str(action)
+            )
+            if desc and desc not in board_actions:
+                board_actions.append(desc)
+    else:
+        # Fall back to board actions embedded in search results
+        for practitioner in results:
+            for action in practitioner.get("boardActions", []) or []:
+                desc = action.get("category") or action.get("actionType") or str(action)
+                if desc and desc not in board_actions:
+                    board_actions.append(desc)
 
     return {
         "npi": npi,
