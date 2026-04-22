@@ -4,267 +4,338 @@
 
 ## 1. Agenda / Purpose
 
-The goal of this project is to automate the process of finding and extracting structured provider information from medical clinic websites. Given only a clinic address (and optionally a name), the tool:
+This tool automates the process of finding and extracting structured provider information from medical clinic websites. Given a clinic address (and optionally a provider name), it:
 
-1. Finds the clinic's official website automatically via search APIs
+1. Finds the clinic's official website via search APIs
 2. Scrapes the website for staff and provider pages
-3. Uses an AI model (Claude) to intelligently extract structured data — provider names, titles, specialties, current employer, phone, email, address, and license states
-4. Validates the extracted address against the input address to ensure the right clinic was found
-5. Falls back to the official CMS NPI Registry if no website is found, scraping fails, or the address doesn't match
-6. Saves the results as a clean JSON file and a human-readable report
+3. Uses Claude AI to extract structured data (names, titles, specialties, contact info)
+4. Validates the extracted address against the input to confirm the right clinic was found
+5. Falls back to the official CMS NPI Registry if the website fails or address doesn't match
+6. Verifies each provider's license using the FSMB MED API (DocInfo) and NPI taxonomy data
+7. Checks the FDA CDRH establishment database for clinic device registration
+8. Saves results as a timestamped JSON file and a plain-text report
 
 ---
 
-## 2. High-Level Flow
+## 2. Two Operating Modes
+
+| Mode | How to invoke | Behaviour |
+|---|---|---|
+| **Address-only** | `python3 clinic_scraper.py "Street, City, ST ZIP"` | Returns only providers licensed in the input state at that address |
+| **Name + Address** | `python3 clinic_scraper.py "Dr. Name" "Street, City, ST ZIP"` | Finds that specific provider and returns full license info across all states |
+
+---
+
+## 3. High-Level Flow
 
 ```
-User Input (address / optional name)
+User Input
+  [optional name]  "Street, City, ST ZIP"
         │
         ▼
- [Step 1] Search
-  Find clinic website URL via Serper (Google) → fallback DuckDuckGo
+ [1/5] Search
+  Serper.dev (Google) → fallback DuckDuckGo
+  Find clinic's official website URL
         │
-        ▼ (no URL found → skip to NPI)
- [Step 2] Scrape
-  Fetch homepage + discover and fetch staff/provider sub-pages (up to 5)
+        ▼ no URL, blocked, or address mismatch → skip to NPI
+ [2/5] Scrape
+  Fetch homepage + up to 5 staff/provider sub-pages
         │
-        ▼ (site blocked / 0 pages → skip to NPI)
- [Step 3] Extract
-  Send combined page text to Claude AI for Named Entity Recognition (NER)
-  → Returns structured JSON: clinic info + list of providers
+        ▼ 0 pages or address mismatch → skip to NPI
+ [3/5] Extract (Claude AI)
+  Send combined page text to claude-sonnet-4-5
+  Returns: clinic info + provider list with employer, specialty, contact
         │
-        ▼
- [Step 3b] Address Validation
-  Check extracted address against input postal code + street
-  → Mismatch → fall back to NPI
-        │
-        ▼ (0 providers or address mismatch → NPI fallback)
+        ▼ 0 providers or address mismatch → skip to NPI
  [NPI Fallback] CMS NPI Registry
-  Query official government registry by name/address/postal code
-  → Returns verified provider data with NPI numbers and license states
+  Name mode   → search by first/last name (state-scoped, then national)
+  Address mode → fetch ZIP results, filter to providers at exact street
         │
         ▼
- [Step 4] Output
-  Save results as:
-    • output/<name>_<timestamp>.json   (machine-readable)
-    • output/<name>_<timestamp>.txt    (human-readable report)
+ [4/5] License Verification
+  For each provider:
+    → FSMB MED API (DocInfo): license status, number, board actions
+    → NPI taxonomy: license states + numbers (fallback if no FSMB creds)
+    → FDA CDRH: check clinic establishment registration
+  Address-only mode: filter out providers with no license in target state
+        │
+        ▼
+ [5/5] Save
+  output/<slug>_<timestamp>.json   (machine-readable)
+  output/<slug>_<timestamp>.txt    (human-readable report)
 ```
 
 ---
 
-## 3. Project Structure
+## 4. Project Structure
 
 ```
 clinic-scraper-poc/
 │
-├── clinic_scraper.py       # Entry point — CLI, argument parsing, orchestration
+├── clinic_scraper.py       # Entry point — CLI, orchestration, mode logic
 ├── requirements.txt        # Python dependencies
-├── .env                    # API keys and config (not committed to git)
-├── .gitignore              # Excludes .env, output/, venv/, __pycache__
+├── .env                    # API keys (never committed to git)
+├── .gitignore
 ├── PROJECT_DOCUMENT.md     # This document
 │
 ├── steps/
-│   ├── __init__.py         # Exports all step functions
+│   ├── __init__.py         # Exports all public step functions
 │   ├── search.py           # Step 1 — find clinic website URL
 │   ├── scraper.py          # Step 2 — scrape website pages
 │   ├── extractor.py        # Step 3 — Claude AI NER extraction
-│   ├── npi.py              # NPI Registry fallback lookup
-│   └── output.py           # Step 4 — save JSON + generate report
+│   ├── npi.py              # NPI Registry lookup + street address filtering
+│   ├── license.py          # License verification: FSMB API + FDA CDRH
+│   └── output.py           # Save JSON + plain-text report
 │
-└── output/                 # Generated results (created on first run, gitignored)
-    ├── <clinic>_<timestamp>.json
-    └── <clinic>_<timestamp>.txt
+└── output/                 # Generated results (gitignored)
+    ├── <slug>_<timestamp>.json
+    └── <slug>_<timestamp>.txt
 ```
 
 ---
 
-## 4. How to Run
+## 5. How to Run
 
-**Install dependencies (once):**
+**First-time setup:**
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Each new terminal session:**
+**Every new terminal session:**
 ```bash
 source venv/bin/activate
 ```
 
-**Run:**
+**Run using the venv Python directly (most reliable):**
 ```bash
-# Address only (no clinic name known)
-python3 clinic_scraper.py "815 W Randolph St, Chicago, IL 60607"
+# Address only — returns all licensed providers at that location
+venv/bin/python3 clinic_scraper.py "121 S Crescent Dr Ste B, Pueblo, CO 81003"
 
-# With clinic name (gives more accurate search results)
-python3 clinic_scraper.py "Rush University Medical Center" "1653 W Congress Pkwy, Chicago, IL 60612"
+# Name + address — finds that specific provider with full license info
+venv/bin/python3 clinic_scraper.py "Dr. Abner Fernandez" "121 S Crescent Dr Ste B, Pueblo, CO 81003"
+
+# Custom output directory
+venv/bin/python3 clinic_scraper.py "Rush University" "1653 W Congress Pkwy, Chicago, IL 60612" --output-dir my_results
 ```
 
-Address format must be: `"Street, City, ST 00000"` (two-letter state, 5-digit ZIP)
+Address format required: `"Street, City, ST 00000"` — two-letter state, 5-digit ZIP.
 
 ---
 
-## 5. Code Walkthrough
+## 6. Code Walkthrough
 
 ### `clinic_scraper.py` — Entry Point
 
-**Purpose:** Parses command-line input, validates the address format, and calls each step in sequence.
+Parses arguments, sets the operating mode, and orchestrates all 5 steps.
 
-**Key logic:**
-- Accepts 1 or 2 positional arguments: `[optional name]` `"address string"`
-- Parses the address string using a regex into: street, city, state, postal
-- Calls steps 1–4 in order with automatic fallback at each stage
-- **Address validation:** after Claude extraction, checks that the extracted clinic address matches the input postal code or street number — if not, discards the result and uses NPI Registry instead
-- Output filenames are timestamped and slugified from the clinic name or address
+**Two modes:**
+- `address_only_mode = True` when no name is given — filters final provider list to those licensed in the target state only
+- `address_only_mode = False` when a name is given — returns all license info for that provider regardless of state
 
-**Fallback triggers:**
-| Situation | Action |
-|---|---|
-| No website found by search | Skip to NPI Registry |
-| Website blocked scraping (403 etc.) | Skip to NPI Registry |
-| Claude extracts 0 providers | Skip to NPI Registry |
-| Extracted address doesn't match input | Skip to NPI Registry |
+**Fallback triggers (any of these causes NPI to be used instead of the website):**
+- No website URL found by search
+- Website returns 0 pages (blocked/403)
+- Claude extracts 0 providers
+- Extracted clinic address postal code or street number doesn't match input
 
 ---
 
 ### `steps/search.py` — Website Discovery
 
-**Purpose:** Takes the clinic name + address and returns the URL of the clinic's official website.
+Builds a search query and returns the first non-aggregator result URL.
 
-**How it works:**
-1. With name: `"<name> <address> <state> <postal> official website"`
-2. Without name: `"<address>" <state> <postal> clinic"` (address in quotes for exact matching)
-3. Tries **Serper.dev** (Google Search API) first, falls back to **DuckDuckGo**
+- **With name:** `"<name> <address> <state> <ZIP> official website"`
+- **Without name:** `"<address>" <state> <ZIP> clinic"` (quoted address for exact match)
+- Tries **Serper.dev** (Google Search API) first, falls back to **DuckDuckGo**
 
-**Aggregator blocklist** (skipped):
-`yelp.com`, `healthgrades.com`, `zocdoc.com`, `facebook.com`, `zoominfo.com`, `linkedin.com`, `vitals.com`, `webmd.com`, `yellowpages.com`, `mapquest.com`, `bbb.org`, `dnb.com`
+**Blocked aggregator sites:** yelp.com, healthgrades.com, zocdoc.com, facebook.com, zoominfo.com, linkedin.com, vitals.com, webmd.com, yellowpages.com, mapquest.com, bbb.org, dnb.com
 
 ---
 
 ### `steps/scraper.py` — Website Scraping
 
-**Purpose:** Fetches and cleans text from the clinic homepage and staff/provider sub-pages.
+Fetches and cleans text from the homepage and up to 5 staff/provider sub-pages.
 
-**How it works:**
-1. Opens a `requests.Session` with a Chrome browser User-Agent
-2. Fetches the homepage and strips `<script>`, `<style>`, `<noscript>`, `<head>` tags via **BeautifulSoup**
-3. Scans all `<a>` links for staff/provider page keywords, fetches up to 5 sub-pages
-4. Combines all page text into one block separated by page URL labels
-
-**Staff page keywords:**
-`staff`, `provider`, `physician`, `doctor`, `team`, `meet-our`, `our-team`, `directory`, `faculty`, `clinician`, `practitioner`, `specialist`, `about-us`, `about/team`
+- Uses a Chrome browser User-Agent to reduce bot detection
+- Parses HTML with **BeautifulSoup + html.parser** (built-in, no extra install)
+- Strips `<script>`, `<style>`, `<noscript>`, `<head>` tags
+- Discovers staff/provider pages by scanning `<a>` links for keywords:
+  `staff`, `provider`, `physician`, `doctor`, `team`, `meet-our`, `our-team`, `directory`, `faculty`, `clinician`, `practitioner`, `specialist`, `about-us`, `about/team`
 
 ---
 
-### `steps/extractor.py` — Claude AI NER Extraction
+### `steps/extractor.py` — Claude AI NER
 
-**Purpose:** Sends scraped website text to Claude AI and returns structured provider data.
+Sends combined page text to Claude and returns structured provider data.
 
-**Model:** `claude-sonnet-4-5`
+- **Model:** `claude-sonnet-4-5`
+- **Max input:** 100,000 characters (~25k tokens)
+- Strips markdown fences from response before JSON parsing
+- Records token usage for cost tracking
 
 **Extracted fields per provider:**
-- `name`, `title`, `specialty`
-- `current_employer` — clinic/hospital/org they work at
-- `phone`, `email`
-- `license_states` — list of US state abbreviations where a license is mentioned
-
-**How it works:**
-1. Truncates input to 100,000 characters to control token cost
-2. Sends system + user prompt to Claude with the scraped text
-3. Strips any markdown fences from the response before JSON parsing
-4. Records token usage for cost tracking
+`name`, `title`, `specialty`, `current_employer`, `phone`, `email`, `license_states`
 
 ---
 
-### `steps/npi.py` — NPI Registry Fallback
+### `steps/npi.py` — NPI Registry Lookup
 
-**Purpose:** Queries the CMS National Provider Identifier (NPI) Registry — the official US government database of all licensed healthcare providers.
+Queries the CMS NPI Registry (free, no API key needed).
 
-**No API key required.** Uses the public CMS API at `npiregistry.cms.hhs.gov`.
+**Name mode:**
+1. Search by first + last name scoped to target state
+2. If no results, retry nationally (provider may be licensed elsewhere)
+3. Never falls back to a ZIP code dump when a name is given
 
-**How it works:**
-1. If a name is given, searches by first/last name + state
-2. Falls back to postal code + state location search
-3. Returns the same data shape as `extractor.py` so the rest of the pipeline is unchanged
+**Address-only mode:**
+1. Fetch up to 200 individual providers in the ZIP code
+2. Filter to those whose practice address contains both the **street number** AND the **first meaningful street name word** (skipping directionals like N/S/E/W and suffixes like ST/AVE/DR)
+   - e.g. `"121 S Crescent Dr Ste B"` → matches on `"121"` + `"CRESCENT"`
+3. Returns empty if no providers match — never dumps the whole ZIP
 
-**NPI data includes:**
-- NPI number (unique government ID for each provider)
-- Full name + credential
-- Primary specialty/taxonomy
-- Practice address + phone
-- Current employer (organization name at practice location)
-- License states (derived from all registered addresses)
+**Data extracted from NPI taxonomy:**
+- License state and license number per taxonomy record
+- Primary specialty
+- Practice address, phone, employer
+
+---
+
+### `steps/license.py` — License Verification
+
+Enriches each provider with authoritative license data from three sources:
+
+#### 1. FSMB MED API (DocInfo — primary source)
+- Official API of the Federation of State Medical Boards
+- Returns: license status (Active/Inactive/Expired), license number, board actions/disciplinary history
+- Uses OAuth2 client credentials (`FSMB_CLIENT_ID` + `FSMB_CLIENT_SECRET`)
+- Token is cached in memory and auto-refreshed
+- **Register free at:** https://developer.fsmb.org
+- Gracefully skipped if credentials are not set
+
+#### 2. NPI Registry taxonomy (fallback)
+- License states and license numbers already attached from `npi.py`
+- Used when FSMB credentials are not configured
+
+#### 3. FDA CDRH Establishment Registry
+- Checks if the clinic is registered as a medical device establishment
+- URL: `https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRL/rl.cfm`
+- Returns: `fda_registered: true/false` and establishment details
+
+#### 4. State Board URLs (reference links)
+For manual verification, a direct link to the state medical board lookup page is included for:
+CO, CA, TX, FL, NY, IL, AZ, NV, GA, WA
+
+**Fields added per provider:**
+- `license_number` — actual license number
+- `license_status` — Active / Inactive / Expired (from FSMB)
+- `license_states` — all states where licensed
+- `licensed_in_target_state` — true / false
+- `board_actions` — list of disciplinary actions (from FSMB)
+- `state_board_url` — manual verification link for the input state
 
 ---
 
 ### `steps/output.py` — Save Results
 
-**`save_json(data, path)`** — pretty-printed JSON file
+**`save_json`** — pretty-printed JSON with all raw data
 
-**`save_report(data, path)`** — plain-text report including:
-- Clinic info (name, address, phone, email, website)
-- Numbered provider list with title, specialty, current employer, license states, phone, email
-- Source URL or NPI Registry attribution
-- Token usage (if Claude was used)
-
----
-
-## 6. Dependencies
-
-| Package | Version | Purpose |
-|---|---|---|
-| `anthropic` | ≥ 0.49.0 | Claude AI API client |
-| `beautifulsoup4` | ≥ 4.12.0 | HTML parsing |
-| `requests` | ≥ 2.31.0 | HTTP requests to websites and search APIs |
-| `python-dotenv` | ≥ 1.0.0 | Loads `.env` file into environment variables |
-
-*Note: `lxml` removed from requirements — `html.parser` (Python built-in) is used instead for reliability across environments.*
+**`save_report`** — plain-text report showing per provider:
+- `[LICENSED]` or `[NOT VERIFIED]` badge
+- NPI number
+- Title and specialty
+- Current employer
+- License number and states
+- License status and board actions
+- Phone and email
+- FDA registration status for the clinic at the bottom
 
 ---
 
-## 7. Environment Variables (`.env`)
+## 7. Dependencies
+
+| Package | Purpose |
+|---|---|
+| `anthropic` | Claude AI API client |
+| `beautifulsoup4` | HTML parsing |
+| `requests` | HTTP calls to websites and APIs |
+| `python-dotenv` | Loads `.env` into environment |
+
+*`html.parser` (Python built-in) is used as the BS4 parser — no lxml needed.*
+
+---
+
+## 8. Environment Variables (`.env`)
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | API key for Claude AI (`sk-ant-api03-...`) |
-| `SERPER_API_KEY` | No | API key for Serper.dev (Google Search). Falls back to DuckDuckGo if missing |
+| `ANTHROPIC_API_KEY` | Yes | Claude AI — `sk-ant-api03-...` |
+| `SERPER_API_KEY` | No | Serper.dev Google Search. Falls back to DuckDuckGo if missing |
+| `FSMB_CLIENT_ID` | No | FSMB MED API client ID — enables DocInfo license verification |
+| `FSMB_CLIENT_SECRET` | No | FSMB MED API client secret |
+
+**Get FSMB credentials free at:** https://developer.fsmb.org  
+Without FSMB credentials the tool still works — license states come from NPI taxonomy.
 
 ---
 
-## 8. Known Limitations & Edge Cases
+## 9. License Data Sources Compared
+
+| Source | License Number | License Status | Board Actions | Cost | Key |
+|---|---|---|---|---|---|
+| **FSMB MED API** | Yes | Yes (Active/Inactive) | Yes | Free (registration) | `FSMB_CLIENT_ID/SECRET` |
+| **NPI Registry** | Yes (taxonomy) | No | No | Free | None |
+| **FDA CDRH** | N/A (clinic only) | Device registration | No | Free | None |
+| **ABMS Certification Matters** | N/A | Board certification | No | Paid institutional | Not implemented |
+
+---
+
+## 10. Edge Cases & Behaviour
 
 | Situation | Behaviour |
 |---|---|
-| Site blocks scraping (403/bot detection) | Falls back to NPI Registry |
-| No website found via search | Falls back to NPI Registry |
-| Extracted address doesn't match input | Falls back to NPI Registry |
-| Claude returns markdown-wrapped JSON | Fences stripped automatically |
-| No clinic name provided | Search uses quoted address; filename derived from address |
-| NPI Registry returns no results | Empty provider list saved with a warning |
-| Very large websites | Text truncated at 100,000 characters |
+| No website found by search | Falls back to NPI Registry |
+| Website blocked (403 / bot detection) | Falls back to NPI Registry |
+| Extracted address postal code doesn't match input | Falls back to NPI Registry |
+| Claude extracts 0 providers | Falls back to NPI Registry |
+| NPI name search returns nothing | Retries without state restriction |
+| NPI address search finds no street match | Returns empty — no ZIP dump |
+| FSMB credentials not set | License states from NPI taxonomy only |
+| Provider has no `licensed_in_target_state` (address-only mode) | Excluded from results |
+| Website returns markdown-wrapped JSON | Fences stripped automatically |
+| Very large website | Text truncated at 100,000 characters |
 
 ---
 
-## 9. Sample Terminal Output
+## 11. Sample Terminal Output
 
 ```
 === Clinic Scraper ===
 Target : Unknown Clinic, 121 S Crescent Dr Ste B, Pueblo, CO 81003
+Mode   : Address-only (license filter: CO only)
 
-[1/4] Searching for clinic website...
+[1/5] Searching for clinic website...
       Found: https://www.southerncoloradoclinic.com/
-[2/4] Scraping website...
+[2/5] Scraping website...
       Pages scraped: 2
-[3/4] Extracting providers via Claude NER...
+[3/5] Extracting providers via Claude NER...
       Providers extracted: 36
       Address mismatch (got: 3676 Parker Blvd, Pueblo, CO 81008) — falling back to NPI Registry.
 [NPI] Looking up providers in CMS NPI Registry...
-      Providers found: 12
-      Source: NPI Registry (cms.hhs.gov)
-[4/4] Saving results...
+      4 provider(s) matched street '121 S Crescent Dr Ste B' out of 200 in ZIP 81003
+      Providers found: 4
+[4/5] Verifying licenses...
+      Licensed in CO: 4 / 4 providers
+[5/5] Saving results...
 [output] Saved JSON   → /path/to/output/121_s_crescent_dr_..._20260421.json
 [output] Saved Report → /path/to/output/121_s_crescent_dr_..._20260421.txt
 
 Done. Results saved to /path/to/output
 ```
+
+---
+
+## 12. GitHub Repository
+
+https://github.com/parekatakash/clinic-scraper-poc
