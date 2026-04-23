@@ -176,8 +176,8 @@ def _parse_result(r: dict) -> dict:
     license_states = []
     license_number = None
     for t in taxonomies:
-        t_state = t.get("state", "").strip()
-        t_license = t.get("license", "").strip()
+        t_state = (t.get("state") or "").strip()
+        t_license = (t.get("license") or "").strip()
         if t_state and t_state not in license_states:
             license_states.append(t_state)
         if t_license and not license_number:

@@ -149,6 +149,17 @@ def main() -> None:
         if unlicensed_count:
             print(f"      Excluded {unlicensed_count} provider(s) with no {state} license found")
         providers = licensed
+
+        # If website path ran but all providers were filtered out, try NPI as last resort
+        if not providers and not use_npi_fallback:
+            print("      0 licensed providers after filtering — retrying with NPI Registry...")
+            npi_data = lookup_npi(None, full_address, state, postal)
+            if npi_data.get("providers"):
+                npi_providers = enrich_with_licenses(npi_data["providers"], state)
+                providers = [p for p in npi_providers if p.get("licensed_in_target_state")]
+                print(f"      NPI retry: {len(providers)} licensed provider(s) found")
+                if providers:
+                    data.update({k: v for k, v in npi_data.items() if k != "providers"})
     else:
         # Name+address: keep all, just show license status
         in_state = sum(1 for p in providers if p.get("licensed_in_target_state"))
