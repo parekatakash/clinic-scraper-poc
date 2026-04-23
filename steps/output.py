@@ -91,7 +91,11 @@ def _build_report(data: dict) -> str:
                     lines.append(f"   Vet License     : Found via AAVSB VetVerify")
                 elif found is False:
                     lines.append(f"   Vet License     : Not found in AAVSB VetVerify")
+                else:
+                    lines.append(f"   Vet License     : Verify manually (AAVSB blocks automation)")
                 lines.append(f"   VetVerify URL   : {vet.get('vetverify_lookup_url', '')}")
+                if vet.get("state_vet_board_url"):
+                    lines.append(f"   State Vet Board : {vet['state_vet_board_url']}")
             # Pharmacy license
             if p.get("pharmacy_license_url"):
                 lines.append(f"   Pharmacy Lic.   : Verify at {p['pharmacy_license_url']}")

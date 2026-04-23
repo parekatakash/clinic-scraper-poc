@@ -42,6 +42,29 @@ _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn",
 # Note: AAVSB blocks automated requests with Cloudflare; manual URL is for human verification
 _VETVERIFY_MANUAL = "https://www.aavsb.org/public-tools/vet-verify/"
 
+# State veterinary board license lookup URLs (for manual verification)
+_STATE_VET_BOARD_URLS: dict[str, str] = {
+    "MA": "https://checkalicense.dpl.state.ma.us/",
+    "CA": "https://www.vmb.ca.gov/licensees/verify_license.shtml",
+    "TX": "https://www.txvetboard.state.tx.us/verify.php",
+    "FL": "https://mqa.doh.state.fl.us/MQASearchServices/HealthCareProviders",
+    "NY": "https://www.op.nysed.gov/verification-search",
+    "IL": "https://ilesonline.idfpr.illinois.gov/DFPR/Lookup/LicenseLookup.aspx",
+    "CO": "https://apps.colorado.gov/dora/licensing/lookup/licenselookup.aspx",
+    "WA": "https://fortress.wa.gov/doh/providercredentialsearch/",
+    "GA": "https://gcmb.mylicense.com/verification/Search.aspx",
+    "OH": "https://elicense.ohio.gov/oh_verifylicense/",
+    "PA": "https://www.pals.pa.gov/#/page/search",
+    "NC": "https://www.ncvmb.org/licensee-search",
+    "AZ": "https://www.azvetboard.gov/veterinarian-verification",
+    "NJ": "https://newjersey.mylicense.com/verification/Search.aspx",
+    "VA": "https://dhp.virginiainteractive.org/Lookup/Index",
+    "MI": "https://www.lara.michigan.gov/ormpublic/Home/SearchLicense",
+    "MN": "https://mblsportal.sos.state.mn.us/Business/Search",
+    "OR": "https://obve.oregon.gov/Clients/OBVE/Public/Verifications/",
+    "CT": "https://www.elicense.ct.gov/Lookup/LicenseLookup.aspx",
+}
+
 # ── Pharmacy — NABP + state boards ──────────────────────────────────────────
 _NABP_MANUAL = "https://nabp.pharmacy/programs/pharmacies/nabp-e-profile-id/"
 _STATE_PHARMACY_URLS: dict[str, str] = {
@@ -126,7 +149,13 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
         merged_states = sorted(existing | fsmb_states)
 
         npi_fallback = {}
-        if not merged_states and not fsmb_data.get("license_number"):
+        # Always run NPI lookup for vets (NPI taxonomy carries license numbers for
+        # vets that do have NPI). For non-vets, only run when we have no data yet.
+        run_npi = (
+            "veterinarian" in category
+            or (not merged_states and not fsmb_data.get("license_number"))
+        )
+        if run_npi:
             npi_fallback = _npi_license_lookup(name, target_state)
             npi_states = set(npi_fallback.get("license_states") or [])
             merged_states = sorted(existing | fsmb_states | npi_states)
@@ -157,9 +186,12 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
             if dea_info:
                 updated["dea"] = dea_info
 
-        # ── 3. Veterinary license (AAVSB VetVerify) ──────────────────────────
+        # ── 3. Veterinary license (AAVSB VetVerify + state board URL) ───────────
         if "veterinarian" in category:
-            updated["veterinary_license"] = _vetverify_lookup()
+            vet_lic = _vetverify_lookup()
+            if target_state in _STATE_VET_BOARD_URLS:
+                vet_lic["state_vet_board_url"] = _STATE_VET_BOARD_URLS[target_state]
+            updated["veterinary_license"] = vet_lic
 
         # ── 4. Pharmacy license reference links ───────────────────────────────
         if "pharmacist" in category or "pharmacy" in category:
