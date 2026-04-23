@@ -46,6 +46,78 @@ def _get_provider_category(taxonomies: list) -> tuple[str, bool]:
     return "Healthcare Provider", False
 
 
+def lookup_npi_org(org_name: str | None, street: str, state: str, postal_code: str) -> dict:
+    """
+    Look up a healthcare organization via NPI-2 (organization registry).
+    Returns org name, address, phone, taxonomy, and authorized official.
+    Tries by org name first; falls back to ZIP-based search filtered by street.
+    """
+    results = []
+
+    if org_name:
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-2",
+            "organization_name": org_name,
+            "state": state,
+            "limit": 5,
+        }
+        results = _call_api_raw(params)
+        # Also try without state in case the org is registered in a different state
+        if not results:
+            params_ns = {**params}
+            del params_ns["state"]
+            results = _call_api_raw(params_ns)
+
+    if not results and postal_code and not org_name:
+        # ZIP fallback only when no org name given — avoids matching wrong orgs
+        params = {
+            "version": "2.1",
+            "enumeration_type": "NPI-2",
+            "postal_code": postal_code,
+            "limit": 50,
+        }
+        all_orgs = _call_api_raw(params)
+        results = _filter_org_by_street(all_orgs, street) or all_orgs[:5]
+
+    if not results:
+        return {}
+
+    r = results[0]
+    basic = r.get("basic", {})
+    addresses = r.get("addresses", [])
+    taxonomies = r.get("taxonomies", [])
+    practice = next((a for a in addresses if a.get("address_purpose") == "LOCATION"), addresses[0] if addresses else {})
+
+    org_display_name = (
+        basic.get("organization_name")
+        or basic.get("name")
+        or org_name
+    )
+    city = practice.get("city", "")
+    state_abbr = practice.get("state", "")
+    zip_code = (practice.get("postal_code") or "")[:5]
+    addr_1 = practice.get("address_1", "")
+    full_addr = ", ".join(filter(None, [addr_1, city, f"{state_abbr} {zip_code}".strip()]))
+
+    primary_tax = next((t for t in taxonomies if t.get("primary")), taxonomies[0] if taxonomies else {})
+
+    official_first = basic.get("authorized_official_first_name", "")
+    official_last = basic.get("authorized_official_last_name", "")
+    official_title = basic.get("authorized_official_title_or_position", "")
+    authorized_official = " ".join(filter(None, [official_first, official_last]))
+
+    return {
+        "org_npi": r.get("number"),
+        "org_name": org_display_name,
+        "org_address": full_addr,
+        "org_phone": _format_phone(practice.get("telephone_number", "") or ""),
+        "org_type": primary_tax.get("desc"),
+        "org_authorized_official": authorized_official or None,
+        "org_authorized_official_title": official_title or None,
+    }
+
+
 def lookup_npi(name: str | None, address: str, state: str, postal_code: str) -> dict:
     """
     Query the CMS NPI Registry for providers matching the given name/location.
@@ -179,6 +251,46 @@ def _call_api(params: dict) -> list[dict]:
     except Exception as e:
         print(f"[npi] API error: {e}")
         return []
+
+
+def _call_api_raw(params: dict) -> list[dict]:
+    """Return raw NPI API result dicts (unprocessed) — used for NPI-2 org lookups."""
+    try:
+        resp = requests.get(_NPI_API, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+    except Exception as e:
+        print(f"[npi] API error: {e}")
+        return []
+
+
+def _filter_org_by_street(orgs: list[dict], street: str) -> list[dict]:
+    """Filter NPI-2 org records to those whose address matches the input street."""
+    if not street:
+        return orgs
+
+    def normalise(s: str) -> str:
+        return s.upper().replace(".", "").replace(",", "")
+
+    tokens = normalise(street).split()
+    street_number = tokens[0] if tokens else ""
+    street_name = next(
+        (t for t in tokens[1:] if t not in _DIRECTIONALS and t not in _SUFFIXES
+         and not t.isdigit() and len(t) > 1),
+        ""
+    )
+    key_tokens = [t for t in [street_number, street_name] if t]
+    if not key_tokens:
+        return orgs
+
+    matched = []
+    for org in orgs:
+        for addr in org.get("addresses", []):
+            raw = normalise(addr.get("address_1", "") + " " + addr.get("city", ""))
+            if all(t in raw for t in key_tokens):
+                matched.append(org)
+                break
+    return matched
 
 
 def _parse_result(r: dict) -> dict:

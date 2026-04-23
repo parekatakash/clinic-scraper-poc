@@ -88,27 +88,33 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
         # (happens when provider came from website scraping, not NPI lookup)
         category = (p.get("provider_category") or "").lower()
         if not category:
-            title = (p.get("title") or "").upper().replace(".", "")
-            if any(t in title.split() for t in ["MD", "DO"]):
+            # Normalise: upper-case, strip punctuation so "DVM," → "DVM"
+            title_raw = (p.get("title") or p.get("specialty") or "").upper()
+            title_tokens = {t.strip(".,;()") for t in title_raw.replace("-", " ").split()}
+            if title_tokens & {"MD", "DO"}:
                 category = "physician (md/do)"
                 updated["provider_category"] = "Physician (MD/DO)"
                 updated["requires_dea"] = True
-            elif any(t in title.split() for t in ["NP", "FNP", "APRN", "DNP"]):
+            elif title_tokens & {"NP", "FNP", "APRN", "DNP", "CRNP"}:
                 category = "nurse practitioner"
                 updated["provider_category"] = "Nurse Practitioner"
                 updated["requires_dea"] = True
-            elif any(t in title.split() for t in ["PA"]):
+            elif title_tokens & {"PA", "PA-C"}:
                 category = "physician assistant"
                 updated["provider_category"] = "Physician Assistant"
                 updated["requires_dea"] = True
-            elif any(t in title.split() for t in ["DVM", "VMD"]):
+            elif title_tokens & {"DVM", "VMD", "VETERINARIAN"}:
                 category = "veterinarian"
                 updated["provider_category"] = "Veterinarian"
                 updated["requires_dea"] = True
-            elif any(t in title.split() for t in ["PHARMD", "RPH"]):
+            elif title_tokens & {"PHARMD", "RPH", "PHARMACIST"}:
                 category = "pharmacist"
                 updated["provider_category"] = "Pharmacist"
                 updated["requires_dea"] = False
+            elif title_tokens & {"DDS", "DMD", "DENTIST"}:
+                category = "dentist"
+                updated["provider_category"] = "Dentist"
+                updated["requires_dea"] = True
 
         # ── 1. State medical license (FSMB → NPI) ────────────────────────────
         fsmb_data = {}
@@ -199,15 +205,23 @@ def check_fda_establishment(clinic_name: str, state: str) -> dict:
 # FSMB MED API
 # ─────────────────────────────────────────────────────────────────────────────
 
+_FSMB_PLACEHOLDER = {"your_fsmb_client_id_here", "your_fsmb_client_secret_here", ""}
+
 def _fsmb_token() -> str | None:
-    """Get or refresh the FSMB OAuth2 bearer token."""
+    """Get or refresh the FSMB OAuth2 bearer token.
+    Caches failures for 5 minutes so a network error doesn't cause one timeout per provider.
+    """
     now = time.time()
+    # Return cached token if still valid
     if _FSMB_TOKEN_CACHE.get("token") and _FSMB_TOKEN_CACHE.get("expires_at", 0) > now + 30:
         return _FSMB_TOKEN_CACHE["token"]
+    # Skip retry window after a previous failure
+    if _FSMB_TOKEN_CACHE.get("failed_until", 0) > now:
+        return None
 
-    client_id = os.getenv("FSMB_CLIENT_ID")
-    client_secret = os.getenv("FSMB_CLIENT_SECRET")
-    if not client_id or not client_secret:
+    client_id = os.getenv("FSMB_CLIENT_ID", "")
+    client_secret = os.getenv("FSMB_CLIENT_SECRET", "")
+    if client_id in _FSMB_PLACEHOLDER or client_secret in _FSMB_PLACEHOLDER:
         return None
 
     try:
@@ -225,9 +239,11 @@ def _fsmb_token() -> str | None:
         token_data = resp.json()
         _FSMB_TOKEN_CACHE["token"] = token_data["access_token"]
         _FSMB_TOKEN_CACHE["expires_at"] = now + token_data.get("expires_in", 3600)
+        _FSMB_TOKEN_CACHE.pop("failed_until", None)
         return _FSMB_TOKEN_CACHE["token"]
     except Exception as e:
         print(f"[license] FSMB token error: {e}")
+        _FSMB_TOKEN_CACHE["failed_until"] = now + 300  # stop retrying for 5 min
         return None
 
 
