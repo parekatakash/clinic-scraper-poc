@@ -37,6 +37,12 @@ _ADDRESS_RE = re.compile(
     r"^(?P<street>.+?),\s*(?P<city>[^,]+),\s*(?P<state>[A-Z]{2})\s+(?P<postal>\d{5}(?:-\d{4})?)$"
 )
 
+# Credential suffixes that always mean a person name
+_PERSON_CREDENTIALS = {"md", "do", "dvm", "vmd", "np", "pa", "fnp", "rn", "aprn",
+                       "dds", "dpm", "pharmd", "phd", "dpt", "ot", "slp"}
+# Salutations that always mean a person name
+_PERSON_TITLES = {"dr", "dr.", "mr", "mrs", "ms", "prof"}
+
 # Words that indicate the first argument is an organization, not a person
 _ORG_KEYWORDS = {
     "hospital", "clinic", "medical", "animal", "center", "group",
@@ -47,11 +53,15 @@ _ORG_KEYWORDS = {
     "urgent", "emergency", "wellness", "family", "surgery", "surgical",
     "orthopedic", "pediatric", "oncology", "cardiology", "neurology",
 }
-# Credential suffixes that always mean a person name
-_PERSON_CREDENTIALS = {"md", "do", "dvm", "vmd", "np", "pa", "fnp", "rn", "aprn",
-                       "dds", "dpm", "pharmd", "phd", "dpt", "ot", "slp"}
-# Salutations that always mean a person name
-_PERSON_TITLES = {"dr", "dr.", "mr", "mrs", "ms", "prof"}
+# Strict subset used when evaluating auto-discovered names from search results —
+# must contain an unambiguously healthcare-related word, not just any org word
+_HEALTHCARE_KEYWORDS = {
+    "hospital", "clinic", "medical", "animal", "veterinary", "vet",
+    "healthcare", "health", "pharmacy", "dental", "surgery", "surgical",
+    "orthopedic", "pediatric", "oncology", "cardiology", "neurology",
+    "rehabilitation", "therapy", "urgent", "emergency", "wellness",
+    "physician", "doctor", "care center", "med center",
+}
 
 
 def _parse_address(raw: str) -> tuple[str, str, str, str]:
@@ -66,19 +76,25 @@ def _parse_address(raw: str) -> tuple[str, str, str, str]:
 def _is_org_name(s: str) -> bool:
     """Return True if s looks like an organization name rather than a person name."""
     words = [w.lower().strip(".,") for w in s.split()]
-    # Starts with a person salutation → person
     if words and words[0] in _PERSON_TITLES:
         return False
-    # Contains a credential suffix → person (e.g. "Abner Fernandez MD")
     if any(w in _PERSON_CREDENTIALS for w in words):
         return False
-    # Contains an org keyword → org
     if any(w in _ORG_KEYWORDS for w in words):
         return True
     # 4+ words with no person title and no credential → almost certainly an org
     if len(words) >= 4:
         return True
     return False
+
+
+def _is_healthcare_name(s: str) -> bool:
+    """Stricter check: True only if s contains an unambiguous healthcare keyword.
+    Used when evaluating auto-discovered names from search results so we don't
+    accept a pub, restaurant, or gym as the 'clinic' at an address.
+    """
+    words = [w.lower().strip(".,") for w in s.split()]
+    return any(w in _HEALTHCARE_KEYWORDS for w in words)
 
 
 def _slug(text: str) -> str:
@@ -149,8 +165,31 @@ def main() -> None:
     # ── Step 1: Find website ──────────────────────────────────────────────────
     print("[1/5] Searching for clinic website...")
     search_name = org_name or person_name  # used to build search query
-    url = search_clinic_website(search_name, full_address, state, postal)
+    search_result = search_clinic_website(search_name, full_address, state, postal)
     use_npi_fallback = False
+
+    # search returns (url, discovered_name) or None
+    if search_result:
+        url, discovered_name = search_result
+    else:
+        url, discovered_name = None, None
+
+    # In address-only mode, use the business name the search engine returned
+    # only if it looks like a healthcare org (not a pub, restaurant, etc.)
+    if mode == "address" and discovered_name and not org_name:
+        if _is_healthcare_name(discovered_name):
+            org_name = discovered_name
+            print(f"      Discovered: {discovered_name}")
+            # If the initial search didn't return a usable URL, re-search by org name
+            if not url:
+                print(f"      Re-searching with org name...")
+                targeted = search_clinic_website(org_name, full_address, state, postal)
+                if targeted:
+                    url = targeted[0]
+                    if url:
+                        print(f"      Found: {url}")
+        else:
+            print(f"      Skipped non-healthcare result: '{discovered_name}'")
 
     if not url:
         print("      No website found — will use NPI Registry fallback.")
@@ -181,8 +220,8 @@ def main() -> None:
         if provider_count == 0:
             print("      No providers found — falling back to NPI Registry.")
             use_npi_fallback = True
-        elif mode != "org" and not _address_matches(data, street, postal):
-            # Org mode: trust the website we found by searching for the org name
+        elif mode != "org" and not org_name and not _address_matches(data, street, postal):
+            # Trust the website when we have a confirmed org name (user-provided or discovered)
             print(f"      Address mismatch (got: {data.get('address')}) — falling back to NPI Registry.")
             use_npi_fallback = True
 
@@ -228,10 +267,17 @@ def main() -> None:
     providers = enrich_with_licenses(providers, state)
 
     if mode == "address":
-        # Keep only providers licensed in the target state
-        licensed = [p for p in providers if p.get("licensed_in_target_state")]
+        # Keep licensed providers; also keep vets with vet titles since AAVSB
+        # blocks automated verification — a DVM on a vet clinic's staff page is
+        # almost certainly licensed in the state where they practice.
+        def _include(p: dict) -> bool:
+            if p.get("licensed_in_target_state"):
+                return True
+            return "veterinarian" in (p.get("provider_category") or "").lower()
+
+        licensed = [p for p in providers if _include(p)]
         unlicensed_count = len(providers) - len(licensed)
-        print(f"      Licensed in {state}: {len(licensed)} / {len(providers)} providers")
+        print(f"      Licensed/verified in {state}: {len(licensed)} / {len(providers)} providers")
         if unlicensed_count:
             print(f"      Excluded {unlicensed_count} provider(s) with no {state} license found")
         providers = licensed

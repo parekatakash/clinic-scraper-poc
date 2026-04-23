@@ -78,7 +78,7 @@ def lookup_npi_org(org_name: str | None, street: str, state: str, postal_code: s
             "limit": 50,
         }
         all_orgs = _call_api_raw(params)
-        results = _filter_org_by_street(all_orgs, street) or all_orgs[:5]
+        results = _filter_org_by_street(all_orgs, street)  # empty if no street match — never dump wrong orgs
 
     if not results:
         return {}

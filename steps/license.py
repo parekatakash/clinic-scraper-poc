@@ -38,9 +38,9 @@ _STATE_BOARD_URLS: dict[str, str] = {
 _FDA_URL = "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRL/rl.cfm"
 _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn", "dnp", "pharmd"}
 
-# ── Veterinary license — AAVSB VetVerify ────────────────────────────────────
-_VETVERIFY_URL = "https://www.vetverify.org/verification/SearchDVM"
-_VETVERIFY_MANUAL = "https://www.vetverify.org/"
+# ── Veterinary license — AAVSB VetVerify ─────────────────────────────────────
+# Note: AAVSB blocks automated requests with Cloudflare; manual URL is for human verification
+_VETVERIFY_MANUAL = "https://www.aavsb.org/public-tools/vet-verify/"
 
 # ── Pharmacy — NABP + state boards ──────────────────────────────────────────
 _NABP_MANUAL = "https://nabp.pharmacy/programs/pharmacies/nabp-e-profile-id/"
@@ -159,13 +159,7 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
 
         # ── 3. Veterinary license (AAVSB VetVerify) ──────────────────────────
         if "veterinarian" in category:
-            parts = _name_parts(name)
-            vet_lic = _vetverify_lookup(
-                first=parts[0] if parts else "",
-                last=parts[-1] if len(parts) > 1 else "",
-                state=target_state,
-            )
-            updated["veterinary_license"] = vet_lic
+            updated["veterinary_license"] = _vetverify_lookup()
 
         # ── 4. Pharmacy license reference links ───────────────────────────────
         if "pharmacist" in category or "pharmacy" in category:
@@ -427,41 +421,9 @@ def _name_parts(full_name: str) -> list[str]:
 # Veterinary license — AAVSB VetVerify
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _vetverify_lookup(first: str, last: str, state: str) -> dict:
-    """
-    Look up a veterinary license via AAVSB VetVerify (vetverify.org).
-    Returns license status and number if found; falls back to manual URL.
-    """
-    base = {"vetverify_lookup_url": _VETVERIFY_MANUAL}
-    if not first or not last:
-        return base
-    try:
-        resp = requests.post(
-            _VETVERIFY_URL,
-            data={"firstName": first, "lastName": last, "state": state},
-            headers={"User-Agent": "Mozilla/5.0",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-            timeout=12,
-        )
-        if resp.status_code != 200:
-            return base
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = []
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = [c.get_text(strip=True) for c in row.find_all("td")]
-                if cells:
-                    rows.append(cells)
-        if not rows:
-            return {**base, "vet_license_found": False}
-        return {
-            **base,
-            "vet_license_found": True,
-            "vet_license_data": rows[:5],
-        }
-    except Exception as e:
-        print(f"[license] VetVerify lookup error: {e}")
-        return base
+def _vetverify_lookup() -> dict:
+    """AAVSB VetVerify blocks automated requests (Cloudflare); return manual URL only."""
+    return {"vetverify_lookup_url": _VETVERIFY_MANUAL}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

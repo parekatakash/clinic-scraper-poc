@@ -82,4 +82,43 @@ def extract_providers(scraped_text: str, website_url: str) -> dict:
         "input_tokens": message.usage.input_tokens,
         "output_tokens": message.usage.output_tokens,
     }
+
+    if "providers" in data:
+        data["providers"] = _deduplicate_providers(data["providers"])
+
     return data
+
+
+_TITLE_STRIP = re.compile(
+    r"\b(dr\.?|mr\.?|mrs\.?|ms\.?|prof\.?|dvm|vmd|md|do|np|pa|fnp|rn|aprn|dds|dpm)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_name(raw: str) -> tuple[str, str]:
+    """Return (first_token, last_token) stripped of titles and middle initials."""
+    cleaned = _TITLE_STRIP.sub("", raw).strip()
+    parts = [p for p in cleaned.split() if len(p) > 1 and not re.match(r"^[A-Z]\.$", p)]
+    if not parts:
+        return ("", "")
+    return (parts[0].lower(), parts[-1].lower())
+
+
+def _deduplicate_providers(providers: list[dict]) -> list[dict]:
+    """Remove providers that are clearly the same person listed under two name formats."""
+    seen: dict[tuple[str, str], int] = {}  # (first, last) → index in output
+    out: list[dict] = []
+    for p in providers:
+        key = _normalise_name(p.get("name") or "")
+        if key == ("", ""):
+            out.append(p)
+            continue
+        if key in seen:
+            # Keep whichever entry has more non-null fields
+            existing = out[seen[key]]
+            if sum(1 for v in p.values() if v) > sum(1 for v in existing.values() if v):
+                out[seen[key]] = p
+        else:
+            seen[key] = len(out)
+            out.append(p)
+    return out
