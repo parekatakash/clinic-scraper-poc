@@ -1,16 +1,18 @@
 """
-License verification using:
-1. FSMB MED API  — official Federation of State Medical Boards API
-   Requires: FSMB_CLIENT_ID + FSMB_CLIENT_SECRET in .env
-   Register free at: https://developer.fsmb.org
-2. NPI Registry  — already enriched upstream; used as base data
-3. State Medical Board direct lookup — fallback for key states
+License verification — all applicable license types:
+1. State Medical License  — FSMB MED API (docinfo.org) + NPI taxonomy fallback
+2. DEA Registration       — steps/dea.py (checksum + best-effort web lookup)
+3. Veterinary License     — AAVSB VetVerify (vetverify.org)
+4. Pharmacy License       — NABP lookup URL + state pharmacy board links
+5. Facility Registration  — FDA CDRH (check_fda_establishment)
+6. Medicare Enrollment    — CMS PECOS open data API
 """
 
 import os
 import time
 import requests
 from bs4 import BeautifulSoup
+from .dea import verify_dea
 
 # ── FSMB MED API ─────────────────────────────────────────────────────────────
 _FSMB_TOKEN_URL = "https://identity.fsmb.org/connect/token"
@@ -36,6 +38,27 @@ _STATE_BOARD_URLS: dict[str, str] = {
 _FDA_URL = "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRL/rl.cfm"
 _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn", "dnp", "pharmd"}
 
+# ── Veterinary license — AAVSB VetVerify ────────────────────────────────────
+_VETVERIFY_URL = "https://www.vetverify.org/verification/SearchDVM"
+_VETVERIFY_MANUAL = "https://www.vetverify.org/"
+
+# ── Pharmacy — NABP + state boards ──────────────────────────────────────────
+_NABP_MANUAL = "https://nabp.pharmacy/programs/pharmacies/nabp-e-profile-id/"
+_STATE_PHARMACY_URLS: dict[str, str] = {
+    "CO": "https://www.dora.state.co.us/pls/real/GENAPP_MAIN.Select_Search_Choice",
+    "CA": "https://www.pharmacy.ca.gov/consumers/verify_lic.shtml",
+    "TX": "https://www.pharmacy.texas.gov/consumer/license_verif.asp",
+    "FL": "https://mqa.doh.state.fl.us/MQASearchServices/HealthCareProviders",
+    "NY": "https://www.op.nysed.gov/verification-search",
+    "IL": "https://ilesonline.idfpr.illinois.gov/DFPR/Lookup/LicenseLookup.aspx",
+    "MA": "https://checkalicense.dpl.state.ma.us/",
+    "GA": "https://gcmb.mylicense.com/verification/Search.aspx",
+    "WA": "https://fortress.wa.gov/doh/providercredentialsearch/",
+}
+
+# ── Medicare enrollment — CMS PECOS open data ────────────────────────────────
+_CMS_PECOS_URL = "https://data.cms.gov/provider-data/api/1/datastore/query/1fd32a89-e3c7-41f9-b0c8-d61b05cac70e/0"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public interface
@@ -43,8 +66,12 @@ _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn",
 
 def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]:
     """
-    Enrich each provider with license verification data.
-    Priority: FSMB MED API → NPI taxonomy on record → NPI name lookup fallback.
+    Enrich each provider with all applicable license types:
+      - State medical license  (FSMB → NPI taxonomy → NPI name lookup)
+      - DEA registration       (checksum + best-effort web lookup)
+      - Veterinary license     (AAVSB VetVerify — when provider_category is Veterinarian)
+      - Pharmacy license URLs  (when provider_category is Pharmacist / Pharmacy)
+      - Medicare enrollment    (CMS PECOS open data)
     """
     use_fsmb = bool(os.getenv("FSMB_CLIENT_ID") and os.getenv("FSMB_CLIENT_SECRET"))
     enriched = []
@@ -56,42 +83,94 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
             continue
 
         updated = {**p}
-        fsmb_data = {}
 
-        if use_fsmb:
+        # Infer provider_category from title when NPI taxonomy wasn't available
+        # (happens when provider came from website scraping, not NPI lookup)
+        category = (p.get("provider_category") or "").lower()
+        if not category:
+            title = (p.get("title") or "").upper().replace(".", "")
+            if any(t in title.split() for t in ["MD", "DO"]):
+                category = "physician (md/do)"
+                updated["provider_category"] = "Physician (MD/DO)"
+                updated["requires_dea"] = True
+            elif any(t in title.split() for t in ["NP", "FNP", "APRN", "DNP"]):
+                category = "nurse practitioner"
+                updated["provider_category"] = "Nurse Practitioner"
+                updated["requires_dea"] = True
+            elif any(t in title.split() for t in ["PA"]):
+                category = "physician assistant"
+                updated["provider_category"] = "Physician Assistant"
+                updated["requires_dea"] = True
+            elif any(t in title.split() for t in ["DVM", "VMD"]):
+                category = "veterinarian"
+                updated["provider_category"] = "Veterinarian"
+                updated["requires_dea"] = True
+            elif any(t in title.split() for t in ["PHARMD", "RPH"]):
+                category = "pharmacist"
+                updated["provider_category"] = "Pharmacist"
+                updated["requires_dea"] = False
+
+        # ── 1. State medical license (FSMB → NPI) ────────────────────────────
+        fsmb_data = {}
+        if use_fsmb and "veterinarian" not in category and "pharmacy" not in category:
             fsmb_data = _fsmb_lookup(name, target_state)
 
-        # Merge license states: NPI taxonomy already on record + FSMB result
         existing = set(p.get("license_states") or [])
         fsmb_states = set(fsmb_data.get("license_states") or [])
         merged_states = sorted(existing | fsmb_states)
 
-        # If still no license data, do a live NPI name lookup as last resort
-        # (happens when provider came from website scraping, not NPI fallback)
         npi_fallback = {}
         if not merged_states and not fsmb_data.get("license_number"):
             npi_fallback = _npi_license_lookup(name, target_state)
             npi_states = set(npi_fallback.get("license_states") or [])
             merged_states = sorted(existing | fsmb_states | npi_states)
 
-        updated["license_states"] = merged_states
-        updated["license_number"] = (
-            fsmb_data.get("license_number")
-            or npi_fallback.get("license_number")
-            or p.get("license_number")
-        )
-        updated["license_status"] = fsmb_data.get("license_status")
-        updated["board_actions"] = fsmb_data.get("board_actions", [])
-        updated["npi"] = (
-            fsmb_data.get("npi")
-            or npi_fallback.get("npi")
-            or p.get("npi")
-        )
+        updated["license_states"]  = merged_states
+        updated["license_number"]  = (fsmb_data.get("license_number")
+                                      or npi_fallback.get("license_number")
+                                      or p.get("license_number"))
+        updated["license_status"]  = fsmb_data.get("license_status")
+        updated["board_actions"]   = fsmb_data.get("board_actions", [])
+        updated["npi"]             = (fsmb_data.get("npi")
+                                      or npi_fallback.get("npi")
+                                      or p.get("npi"))
         updated["licensed_in_target_state"] = target_state in merged_states
 
-        # State board URL for manual verification
         if target_state in _STATE_BOARD_URLS:
             updated["state_board_url"] = _STATE_BOARD_URLS[target_state]
+
+        # ── 2. DEA registration ───────────────────────────────────────────────
+        if p.get("requires_dea") or "physician" in category or "veterinarian" in category \
+                or "nurse practitioner" in category or "physician assistant" in category:
+            parts = _name_parts(name)
+            dea_info = verify_dea(
+                first_name=parts[0] if parts else None,
+                last_name=parts[-1] if len(parts) > 1 else None,
+                state=target_state,
+            )
+            if dea_info:
+                updated["dea"] = dea_info
+
+        # ── 3. Veterinary license (AAVSB VetVerify) ──────────────────────────
+        if "veterinarian" in category:
+            parts = _name_parts(name)
+            vet_lic = _vetverify_lookup(
+                first=parts[0] if parts else "",
+                last=parts[-1] if len(parts) > 1 else "",
+                state=target_state,
+            )
+            updated["veterinary_license"] = vet_lic
+
+        # ── 4. Pharmacy license reference links ───────────────────────────────
+        if "pharmacist" in category or "pharmacy" in category:
+            updated["pharmacy_license_url"] = _STATE_PHARMACY_URLS.get(
+                target_state, _NABP_MANUAL
+            )
+
+        # ── 5. Medicare enrollment (CMS PECOS) ───────────────────────────────
+        npi_num = updated.get("npi")
+        if npi_num:
+            updated["medicare_enrollment"] = _cms_medicare_lookup(str(npi_num))
 
         enriched.append(updated)
 
@@ -317,6 +396,90 @@ def _parse_fsmb_result(
         "license_status": license_status,
         "board_actions": board_actions,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared utility
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _name_parts(full_name: str) -> list[str]:
+    """Strip title words and return remaining name tokens."""
+    return [p for p in full_name.strip().split() if p.lower().strip(".,") not in _TITLE_WORDS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Veterinary license — AAVSB VetVerify
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _vetverify_lookup(first: str, last: str, state: str) -> dict:
+    """
+    Look up a veterinary license via AAVSB VetVerify (vetverify.org).
+    Returns license status and number if found; falls back to manual URL.
+    """
+    base = {"vetverify_lookup_url": _VETVERIFY_MANUAL}
+    if not first or not last:
+        return base
+    try:
+        resp = requests.post(
+            _VETVERIFY_URL,
+            data={"firstName": first, "lastName": last, "state": state},
+            headers={"User-Agent": "Mozilla/5.0",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            timeout=12,
+        )
+        if resp.status_code != 200:
+            return base
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = []
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = [c.get_text(strip=True) for c in row.find_all("td")]
+                if cells:
+                    rows.append(cells)
+        if not rows:
+            return {**base, "vet_license_found": False}
+        return {
+            **base,
+            "vet_license_found": True,
+            "vet_license_data": rows[:5],
+        }
+    except Exception as e:
+        print(f"[license] VetVerify lookup error: {e}")
+        return base
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Medicare enrollment — CMS PECOS open data
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cms_medicare_lookup(npi: str) -> dict:
+    """Check Medicare enrollment status via CMS PECOS open data API."""
+    try:
+        resp = requests.get(
+            _CMS_PECOS_URL,
+            params={
+                "limit": 1,
+                "filters[0][property]": "npi",
+                "filters[0][value]": npi,
+            },
+            headers={"User-Agent": "clinic-scraper/1.0"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {"medicare_enrolled": None}
+        results = resp.json().get("results", [])
+        if not results:
+            return {"medicare_enrolled": False}
+        row = results[0]
+        return {
+            "medicare_enrolled": True,
+            "medicare_provider_type": row.get("provider_type"),
+            "medicare_state": row.get("state"),
+            "medicare_city": row.get("city"),
+        }
+    except Exception as e:
+        print(f"[license] CMS Medicare lookup error: {e}")
+        return {"medicare_enrolled": None}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

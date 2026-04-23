@@ -83,8 +83,9 @@ clinic-scraper-poc/
 │   ├── search.py           # Step 1 — find clinic website URL
 │   ├── scraper.py          # Step 2 — scrape website pages
 │   ├── extractor.py        # Step 3 — Claude AI NER extraction
-│   ├── npi.py              # NPI Registry lookup + street address filtering
-│   ├── license.py          # License verification: FSMB API + FDA CDRH
+│   ├── npi.py              # NPI Registry lookup + provider category detection
+│   ├── dea.py              # DEA registration: checksum validation + web lookup
+│   ├── license.py          # All license types: FSMB, DEA, VetVerify, Pharmacy, Medicare, FDA
 │   └── output.py           # Save JSON + plain-text report
 │
 └── output/                 # Generated results (gitignored)
@@ -202,9 +203,33 @@ Queries the CMS NPI Registry (free, no API key needed).
 
 ---
 
+### `steps/dea.py` — DEA Registration Verification
+
+Verifies DEA (Drug Enforcement Administration) registration for any provider who handles controlled substances.
+
+**Two methods:**
+1. **Checksum validation** (offline, always runs) — DEA numbers have a defined checksum algorithm. Confirms the number is structurally valid before any API call.
+2. **DEA web lookup** (best-effort) — attempts `apps.deadiversion.usdoj.gov` registrant search by name/number. Falls back gracefully if the site is inaccessible.
+
+**DEA registrant types detected:** Practitioner (B), Mid-Level (C), Pharmacist (S), Researcher (A/G), Narcotic Treatment (M/R/T), Suboxone (X), and more.
+
+**Fields returned:** `dea_number`, `dea_valid_format`, `dea_valid_checksum`, `dea_registrant_type`, `dea_registered`, `dea_schedules`, `dea_expiry`, `dea_lookup_url`
+
+---
+
 ### `steps/license.py` — License Verification
 
-Enriches each provider with authoritative license data from three sources:
+Enriches each provider with **all applicable license types** based on their provider category:
+
+| Provider Category | License Sources Used |
+|---|---|
+| Physician (MD/DO) | FSMB + NPI + DEA + Medicare |
+| Nurse Practitioner / PA | FSMB + NPI + DEA + Medicare |
+| Veterinarian | AAVSB VetVerify + DEA + NPI |
+| Pharmacist | NPI + Pharmacy board URL + Medicare |
+| All others | NPI + Medicare |
+
+**Provider category** is detected from NPI taxonomy codes (set in `npi.py`). For providers extracted from websites (no NPI taxonomy), the title field is used (`MD`/`DO` → Physician, `NP`/`FNP` → Nurse Practitioner, `DVM`/`VMD` → Veterinarian, etc.).
 
 #### 1. FSMB MED API / DocInfo (primary source)
 - Official API of the Federation of State Medical Boards — the same backend that powers https://www.docinfo.org/
@@ -224,22 +249,48 @@ Enriches each provider with authoritative license data from three sources:
 - **Tier 2 (live name lookup):** When a provider came from website scraping (no NPI taxonomy), and FSMB is also unavailable, a live NPI name search is performed automatically to fill in `license_states`, `license_number`, and `npi` number. This ensures license data is always populated regardless of which discovery path was used.
 - NPI national retry: if a state-scoped search returns nothing, retries without state filter.
 
-#### 3. FDA CDRH Establishment Registry
+#### 3. DEA Registration (`steps/dea.py`)
+- Called for all providers where `requires_dea: true` (physicians, NPs, PAs, vets, pharmacists)
+- Checksum validation always runs; web lookup is best-effort
+- Manual DEA lookup URL always included in output for manual fallback
+
+#### 4. Veterinary License — AAVSB VetVerify
+- Called when `provider_category` is `Veterinarian`
+- POST to `https://www.vetverify.org/verification/SearchDVM`
+- Returns `vet_license_found`, raw table data, and manual lookup URL
+
+#### 5. Pharmacy License Reference
+- Called when `provider_category` is `Pharmacist` or `Pharmacy`
+- Returns state-specific pharmacy board URL (CO, CA, TX, FL, NY, IL, MA, GA, WA)
+- Falls back to NABP e-Profile lookup URL for other states
+
+#### 6. Medicare Enrollment — CMS PECOS Open Data
+- Called for all providers with a known NPI number
+- `GET https://data.cms.gov/provider-data/api/1/datastore/query/...`
+- Returns `medicare_enrolled`, `medicare_provider_type`, state, city
+
+#### 7. FDA CDRH Establishment Registry
 - Checks if the clinic is registered as a medical device establishment
 - URL: `https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRL/rl.cfm`
 - Returns: `fda_registered: true/false` and establishment details
 
-#### 4. State Board URLs (reference links)
+#### 8. State Medical Board URLs (reference links)
 For manual verification, a direct link to the state medical board lookup page is included for:
 CO, CA, TX, FL, NY, IL, AZ, NV, GA, WA
 
 **Fields added per provider:**
-- `license_number` — actual license number
+- `provider_category` — detected type (Physician MD/DO, Nurse Practitioner, Veterinarian, Pharmacist, etc.)
+- `requires_dea` — true / false based on provider category
+- `license_number` — state medical license number
 - `license_status` — Active / Inactive / Expired (from FSMB)
 - `license_states` — all states where licensed
 - `licensed_in_target_state` — true / false
 - `board_actions` — list of disciplinary actions (from FSMB)
 - `state_board_url` — manual verification link for the input state
+- `dea` — DEA validation result including `dea_number`, `dea_valid_checksum`, `dea_registrant_type`, `dea_lookup_url`
+- `veterinary_license` — VetVerify result (veterinarians only)
+- `pharmacy_license_url` — state pharmacy board URL (pharmacists only)
+- `medicare_enrollment` — Medicare enrollment status from CMS
 
 ---
 

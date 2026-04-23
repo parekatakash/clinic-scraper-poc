@@ -3,6 +3,48 @@ import requests
 _NPI_API = "https://npiregistry.cms.hhs.gov/api/"
 _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn", "dnp", "pharmd"}
 
+# NPI taxonomy code prefixes → human-readable category and shipping requirement
+# Full taxonomy list: https://nucc.org/index.php/code-sets-mainmenu-41/provider-taxonomy-mainmenu-40
+_TAXONOMY_CATEGORIES = [
+    # (prefix_or_exact, category, requires_dea)
+    ("207",  "Physician (MD/DO)",           True),
+    ("208",  "Physician (MD/DO)",           True),
+    ("2086", "Surgeon",                     True),
+    ("363A", "Physician Assistant",         True),
+    ("363L", "Nurse Practitioner",          True),
+    ("364S", "Clinical Nurse Specialist",   True),
+    ("367A", "Anesthesiologist Assistant",  True),
+    ("367500000X", "CRNA",                  True),
+    ("183500000X", "Pharmacist",            False),
+    ("333600000X", "Pharmacy",              False),
+    ("174400000X", "Veterinarian",          True),
+    ("174M00000X", "Veterinarian",          True),
+    ("103T",  "Psychologist",               False),
+    ("101Y",  "Counselor",                  False),
+    ("122300000X", "Dentist",               True),
+    ("1223",  "Dental Specialist",          True),
+    ("261Q",  "Clinic / Ambulatory Care",   False),
+    ("282N",  "Hospital",                   False),
+    ("291U",  "Laboratory",                 False),
+    ("332B",  "DME Supplier",               False),
+    ("373H",  "Home Health",                False),
+]
+
+
+def _get_provider_category(taxonomies: list) -> tuple[str, bool]:
+    """
+    Return (category_label, requires_dea) based on NPI taxonomy codes.
+    Checks the primary taxonomy first, then falls back to any taxonomy.
+    """
+    primary = next((t for t in taxonomies if t.get("primary")), None)
+    check_order = ([primary] if primary else []) + [t for t in taxonomies if not t.get("primary")]
+    for t in check_order:
+        code = (t.get("code") or "").upper()
+        for prefix, category, req_dea in _TAXONOMY_CATEGORIES:
+            if code.startswith(prefix):
+                return category, req_dea
+    return "Healthcare Provider", False
+
 
 def lookup_npi(name: str | None, address: str, state: str, postal_code: str) -> dict:
     """
@@ -183,10 +225,14 @@ def _parse_result(r: dict) -> dict:
         if t_license and not license_number:
             license_number = t_license
 
+    provider_category, requires_dea = _get_provider_category(taxonomies)
+
     return {
         "name": name,
         "title": credential or None,
         "specialty": specialty,
+        "provider_category": provider_category,
+        "requires_dea": requires_dea,
         "current_employer": employer,
         "phone": phone,
         "email": None,
