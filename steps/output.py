@@ -88,12 +88,20 @@ def _build_report(data: dict) -> str:
             if vet:
                 found = vet.get("vet_license_found")
                 if found is True:
-                    lines.append(f"   Vet License     : Found via AAVSB VetVerify")
-                elif found is False:
-                    lines.append(f"   Vet License     : Not found in AAVSB VetVerify")
+                    vet_lic_num = vet.get("license_number") or p.get("license_number")
+                    vet_status = vet.get("license_status") or p.get("license_status")
+                    msg = f"Found"
+                    if vet_lic_num:
+                        msg += f" — License #{vet_lic_num}"
+                    if vet_status:
+                        msg += f" ({vet_status})"
+                    lines.append(f"   Vet License     : {msg}")
+                    if vet.get("license_expiry"):
+                        lines.append(f"   Vet Lic Expiry  : {vet['license_expiry']}")
                 else:
-                    lines.append(f"   Vet License     : Verify manually (AAVSB blocks automation)")
-                lines.append(f"   VetVerify URL   : {vet.get('vetverify_lookup_url', '')}")
+                    lines.append(f"   Vet License     : Verify manually at state board")
+                if vet.get("vetverify_lookup_url"):
+                    lines.append(f"   AAVSB VetVerify : {vet['vetverify_lookup_url']}")
                 if vet.get("state_vet_board_url"):
                     lines.append(f"   State Vet Board : {vet['state_vet_board_url']}")
             # Pharmacy license

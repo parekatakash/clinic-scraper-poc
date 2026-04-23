@@ -4,11 +4,13 @@ from .extractor import extract_providers
 from .npi import lookup_npi, lookup_npi_org
 from .dea import verify_dea
 from .license import enrich_with_licenses, check_fda_establishment
+from .vet_license import lookup_vet_license
 from .output import save_json, save_report
 
 __all__ = [
     "search_clinic_website", "scrape_clinic", "extract_providers",
     "lookup_npi", "lookup_npi_org", "verify_dea",
     "enrich_with_licenses", "check_fda_establishment",
+    "lookup_vet_license",
     "save_json", "save_report",
 ]

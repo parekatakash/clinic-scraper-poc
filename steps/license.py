@@ -2,7 +2,7 @@
 License verification — all applicable license types:
 1. State Medical License  — FSMB MED API (docinfo.org) + NPI taxonomy fallback
 2. DEA Registration       — steps/dea.py (checksum + best-effort web lookup)
-3. Veterinary License     — AAVSB VetVerify (vetverify.org)
+3. Veterinary License     — state vet board scrapers (NJ, NC) + AAVSB manual URL
 4. Pharmacy License       — NABP lookup URL + state pharmacy board links
 5. Facility Registration  — FDA CDRH (check_fda_establishment)
 6. Medicare Enrollment    — CMS PECOS open data API
@@ -13,6 +13,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from .dea import verify_dea
+from .vet_license import lookup_vet_license
 
 # ── FSMB MED API ─────────────────────────────────────────────────────────────
 _FSMB_TOKEN_URL = "https://identity.fsmb.org/connect/token"
@@ -37,33 +38,6 @@ _STATE_BOARD_URLS: dict[str, str] = {
 
 _FDA_URL = "https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfRL/rl.cfm"
 _TITLE_WORDS = {"dr", "dr.", "md", "do", "np", "pa", "fnp", "dpm", "rn", "aprn", "dnp", "pharmd"}
-
-# ── Veterinary license — AAVSB VetVerify ─────────────────────────────────────
-# Note: AAVSB blocks automated requests with Cloudflare; manual URL is for human verification
-_VETVERIFY_MANUAL = "https://www.aavsb.org/public-tools/vet-verify/"
-
-# State veterinary board license lookup URLs (for manual verification)
-_STATE_VET_BOARD_URLS: dict[str, str] = {
-    "MA": "https://checkalicense.dpl.state.ma.us/",
-    "CA": "https://www.vmb.ca.gov/licensees/verify_license.shtml",
-    "TX": "https://www.txvetboard.state.tx.us/verify.php",
-    "FL": "https://mqa.doh.state.fl.us/MQASearchServices/HealthCareProviders",
-    "NY": "https://www.op.nysed.gov/verification-search",
-    "IL": "https://ilesonline.idfpr.illinois.gov/DFPR/Lookup/LicenseLookup.aspx",
-    "CO": "https://apps.colorado.gov/dora/licensing/lookup/licenselookup.aspx",
-    "WA": "https://fortress.wa.gov/doh/providercredentialsearch/",
-    "GA": "https://gcmb.mylicense.com/verification/Search.aspx",
-    "OH": "https://elicense.ohio.gov/oh_verifylicense/",
-    "PA": "https://www.pals.pa.gov/#/page/search",
-    "NC": "https://www.ncvmb.org/licensee-search",
-    "AZ": "https://www.azvetboard.gov/veterinarian-verification",
-    "NJ": "https://newjersey.mylicense.com/verification/Search.aspx",
-    "VA": "https://dhp.virginiainteractive.org/Lookup/Index",
-    "MI": "https://www.lara.michigan.gov/ormpublic/Home/SearchLicense",
-    "MN": "https://mblsportal.sos.state.mn.us/Business/Search",
-    "OR": "https://obve.oregon.gov/Clients/OBVE/Public/Verifications/",
-    "CT": "https://www.elicense.ct.gov/Lookup/LicenseLookup.aspx",
-}
 
 # ── Pharmacy — NABP + state boards ──────────────────────────────────────────
 _NABP_MANUAL = "https://nabp.pharmacy/programs/pharmacies/nabp-e-profile-id/"
@@ -186,12 +160,26 @@ def enrich_with_licenses(providers: list[dict], target_state: str) -> list[dict]
             if dea_info:
                 updated["dea"] = dea_info
 
-        # ── 3. Veterinary license (AAVSB VetVerify + state board URL) ───────────
+        # ── 3. Veterinary license (state board scraper → AAVSB manual URL) ────────
         if "veterinarian" in category:
-            vet_lic = _vetverify_lookup()
-            if target_state in _STATE_VET_BOARD_URLS:
-                vet_lic["state_vet_board_url"] = _STATE_VET_BOARD_URLS[target_state]
+            parts = _name_parts(name)
+            vet_lic = lookup_vet_license(
+                first=parts[0] if parts else "",
+                last=parts[-1] if len(parts) > 1 else "",
+                state=target_state,
+            )
             updated["veterinary_license"] = vet_lic
+            # If the scraper found a license, update the provider's top-level fields
+            if vet_lic.get("vet_license_found"):
+                updated["licensed_in_target_state"] = True
+                if not updated.get("license_number") and vet_lic.get("license_number"):
+                    updated["license_number"] = vet_lic["license_number"]
+                if not updated.get("license_status") and vet_lic.get("license_status"):
+                    updated["license_status"] = vet_lic["license_status"]
+                if target_state not in (updated.get("license_states") or []):
+                    updated["license_states"] = sorted(
+                        (updated.get("license_states") or []) + [target_state]
+                    )
 
         # ── 4. Pharmacy license reference links ───────────────────────────────
         if "pharmacist" in category or "pharmacy" in category:
@@ -452,11 +440,6 @@ def _name_parts(full_name: str) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Veterinary license — AAVSB VetVerify
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _vetverify_lookup() -> dict:
-    """AAVSB VetVerify blocks automated requests (Cloudflare); return manual URL only."""
-    return {"vetverify_lookup_url": _VETVERIFY_MANUAL}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Medicare enrollment — CMS PECOS open data
