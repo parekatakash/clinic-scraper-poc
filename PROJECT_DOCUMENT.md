@@ -30,6 +30,14 @@ This tool automates the process of finding and extracting structured provider in
 - First argument is an **org** if it contains clinic/hospital keywords — triggers org mode
 - Otherwise → address-only mode (single argument) or person mode (two arguments)
 
+**Single-string auto-split:**
+Name and address can also be passed as one string — the tool detects a name/org prefix before the first digit and splits automatically:
+```bash
+# These two are equivalent:
+python3 clinic_scraper.py "Dr. Abner Fernandez 121 S Crescent Dr Ste B, Pueblo, CO 81003"
+python3 clinic_scraper.py "Dr. Abner Fernandez" "121 S Crescent Dr Ste B, Pueblo, CO 81003"
+```
+
 ---
 
 ## 3. High-Level Flow
@@ -182,6 +190,9 @@ Builds a search query and returns `(url, discovered_name)` tuple.
 - Returns the first non-blocked URL with its title-derived name
 - If all URLs are blocked, returns `(None, fallback_name)` so the name is still available for re-search
 
+**Knowledge graph fallback:**
+Serper returns a `knowledgeGraph` with the clinic's phone, address, and website from Google's business database. These fields are used to populate clinic info in the report even when website scraping and NPI both return nothing.
+
 **Blocked aggregator sites (extended list):**
 yelp.com, healthgrades.com, zocdoc.com, facebook.com, zoominfo.com, linkedin.com, vitals.com, webmd.com, yellowpages.com, mapquest.com, bbb.org, dnb.com, loc8nearme.com, cylex.us, manta.com, n49.com, chamberofcommerce.com, brownbook.net, hotfrog.com, showmelocal.com, storeboard.com, iplanet.com, local.com, citysearch.com, merchantcircle.com
 
@@ -195,7 +206,8 @@ Fetches and cleans text from the homepage and up to 5 staff/provider sub-pages.
 - Parses HTML with **BeautifulSoup + html.parser** (built-in, no extra install)
 - Strips `<script>`, `<style>`, `<noscript>`, `<head>` tags
 - Discovers staff/provider pages by scanning `<a>` links for keywords:
-  `staff`, `provider`, `physician`, `doctor`, `team`, `meet-our`, `our-team`, `directory`, `faculty`, `clinician`, `practitioner`, `specialist`, `about-us`, `about/team`
+  `staff`, `provider`, `physician`, `doctor`, `team`, `meet-our`, `our-team`, `directory`, `faculty`, `clinician`, `practitioner`, `specialist`, `about-us`, `about/team`, `about`, `veterinarian`, `veterinary`, `our-vets`, `our-doctors`, `meet-the`, `doctors`, `vets`, `associates`, `professionals`, `bio`, `bios`
+- **`about` is included** because many small clinics put all provider bios on a single "About" page (e.g., `about.html`) with no separate staff directory
 
 ---
 
@@ -407,7 +419,8 @@ Without FSMB credentials the tool still works — license states come from NPI t
 
 | Situation | Behaviour |
 |---|---|
-| No website found by search | Falls back to NPI Registry |
+| Name + address passed as one string | Auto-split at first digit; name/org detected from prefix |
+| No website found by search | Falls back to NPI Registry; clinic info populated from Google Knowledge Graph |
 | Website blocked (403 / bot detection) | Falls back to NPI Registry |
 | All search results are blocked directories | Name extracted from title → re-search with org name |
 | Discovered org name is a restaurant / pub | Rejected by `_is_healthcare_name()`, no re-search |
