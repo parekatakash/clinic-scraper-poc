@@ -8,6 +8,11 @@ _STAFF_KEYWORDS = [
     "staff", "provider", "physician", "doctor", "team", "meet-our",
     "our-team", "directory", "faculty", "clinician", "practitioner",
     "specialist", "about-us", "about/team",
+    # Vet-specific
+    "veterinarian", "veterinary", "our-vets", "our-doctors", "meet-the",
+    "doctors", "vets", "associates", "professionals", "bio", "bios",
+    # Generic nav pages that often contain staff info on small clinic sites
+    "about",
 ]
 
 _HEADERS = {

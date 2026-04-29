@@ -25,11 +25,12 @@ def search_clinic_website(
     address: str,
     state: str,
     postal_code: str,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, dict]:
     """
     Search for the clinic's official website.
-    Returns (url, discovered_name) where discovered_name is the business name
-    extracted from the search result title (useful in address-only mode).
+    Returns (url, discovered_name, kg_info) where:
+      - discovered_name is the business name from the search result title
+      - kg_info is a dict with phone/address/title from the Google Knowledge Graph
     Tries Serper first, falls back to DuckDuckGo.
     """
     if clinic_name:
@@ -44,7 +45,7 @@ def _is_blocked(url: str) -> bool:
     return any(domain in url for domain in _BLOCKED_DOMAINS)
 
 
-def _serper_search(query: str) -> tuple[str, str | None] | None:
+def _serper_search(query: str) -> tuple[str | None, str | None, dict] | None:
     api_key = os.getenv("SERPER_API_KEY")
     if not api_key:
         return None
@@ -59,9 +60,20 @@ def _serper_search(query: str) -> tuple[str, str | None] | None:
         data = resp.json()
         results = data.get("organic", [])
 
+        # Pull knowledge graph info (phone, address, title) — useful when scraping fails
+        kg = data.get("knowledgeGraph", {})
+        kg_info: dict = {}
+        if kg.get("title"):
+            kg_info["name"] = kg["title"]
+        if kg.get("address"):
+            kg_info["address"] = kg["address"]
+        if kg.get("phone"):
+            kg_info["phone"] = kg["phone"]
+        if kg.get("website"):
+            kg_info["website"] = kg["website"]
+
         # Collect the best available business name from any result (even blocked ones)
-        # so we can use it for a targeted re-search if no good URL is found.
-        fallback_name: str | None = None
+        fallback_name: str | None = kg_info.get("name")
         for result in results:
             title = result.get("title", "")
             n = _clean_title(title) if title else None
@@ -73,19 +85,18 @@ def _serper_search(query: str) -> tuple[str, str | None] | None:
             if link and not _is_blocked(link):
                 title = result.get("title", "")
                 name = _clean_title(title) if title else fallback_name
-                return link, name
+                return link, name, kg_info
 
-        # No non-blocked URL — return name only (knowledge graph > first title)
-        kg = data.get("knowledgeGraph", {})
-        name = kg.get("title") or fallback_name
-        if name:
-            return None, name
+        # No non-blocked URL — return name only
+        name = fallback_name
+        if name or kg_info:
+            return None, name, kg_info
     except Exception as e:
         print(f"[search] Serper error: {e}")
     return None
 
 
-def _duckduckgo_search(query: str) -> tuple[str, str | None] | None:
+def _duckduckgo_search(query: str) -> tuple[str | None, str | None, dict] | None:
     try:
         resp = requests.get(
             "https://api.duckduckgo.com/",
@@ -96,11 +107,11 @@ def _duckduckgo_search(query: str) -> tuple[str, str | None] | None:
         resp.raise_for_status()
         data = resp.json()
         if data.get("Redirect") and not _is_blocked(data["Redirect"]):
-            return data["Redirect"], data.get("Heading") or None
+            return data["Redirect"], data.get("Heading") or None, {}
         for topic in data.get("RelatedTopics", []):
             url = topic.get("FirstURL", "")
             if url and "duckduckgo.com" not in url and not _is_blocked(url):
-                return url, None
+                return url, None, {}
     except Exception as e:
         print(f"[search] DuckDuckGo error: {e}")
     return None

@@ -210,7 +210,8 @@ def _search_by_location(street: str, state: str, postal_code: str) -> list[dict]
 
 
 _DIRECTIONALS = {"N", "S", "E", "W", "NE", "NW", "SE", "SW", "NORTH", "SOUTH", "EAST", "WEST"}
-_SUFFIXES = {"ST", "AVE", "BLVD", "DR", "RD", "LN", "CT", "PL", "WAY", "CIR", "STE", "APT", "UNIT", "FL", "FLOOR"}
+_SUFFIXES = {"ST", "AVE", "BLVD", "DR", "RD", "LN", "CT", "PL", "WAY", "CIR", "STE", "APT", "UNIT", "FL", "FLOOR",
+             "HWY", "HIGHWAY", "RTE", "RT", "SR", "US", "STATE"}
 
 
 def _filter_by_street(providers: list[dict], street: str) -> list[dict]:

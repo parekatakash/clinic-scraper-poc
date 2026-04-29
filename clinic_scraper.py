@@ -130,11 +130,23 @@ def main() -> None:
         args = args[:idx] + args[idx + 2:]
 
     # ── Parse arguments into mode ─────────────────────────────────────────────
+    # Auto-detect "Name Address" passed as a single arg (common mistake).
+    # Street addresses always start with a digit — if the parsed street begins
+    # with non-numeric words, those words are a name/org prefix.
     if len(args) == 1:
-        mode = "address"
-        org_name = None
-        person_name = None
         street, city, state, postal = _parse_address(args[0])
+        tokens = street.split()
+        first_num = next((i for i, t in enumerate(tokens) if re.match(r"^\d", t)), -1)
+        if first_num > 0:
+            maybe_name = " ".join(tokens[:first_num])
+            street = " ".join(tokens[first_num:])
+            print(f"[auto-detect] Split input → name='{maybe_name}' / street='{street}, {city}, {state} {postal}'")
+            if _is_org_name(maybe_name):
+                mode, org_name, person_name = "org", maybe_name, None
+            else:
+                mode, org_name, person_name = "person", None, maybe_name
+        else:
+            mode, org_name, person_name = "address", None, None
     elif len(args) == 2:
         street, city, state, postal = _parse_address(args[1])
         if _is_org_name(args[0]):
@@ -168,11 +180,11 @@ def main() -> None:
     search_result = search_clinic_website(search_name, full_address, state, postal)
     use_npi_fallback = False
 
-    # search returns (url, discovered_name) or None
+    # search returns (url, discovered_name, kg_info) or None
     if search_result:
-        url, discovered_name = search_result
+        url, discovered_name, kg_info = search_result
     else:
-        url, discovered_name = None, None
+        url, discovered_name, kg_info = None, None, {}
 
     # In address-only mode, use the business name the search engine returned
     # only if it looks like a healthcare org (not a pub, restaurant, etc.)
@@ -185,7 +197,8 @@ def main() -> None:
                 print(f"      Re-searching with org name...")
                 targeted = search_clinic_website(org_name, full_address, state, postal)
                 if targeted:
-                    url = targeted[0]
+                    url, _, extra_kg = targeted
+                    kg_info = {**kg_info, **extra_kg}
                     if url:
                         print(f"      Found: {url}")
         else:
@@ -261,35 +274,36 @@ def main() -> None:
         else:
             print("      No NPI-2 organization record found.")
 
+    # ── Fill clinic info from search knowledge graph as last resort ───────────
+    if kg_info:
+        if not data.get("clinic_name") and kg_info.get("name"):
+            data["clinic_name"] = kg_info["name"]
+        if not data.get("address") and kg_info.get("address"):
+            data["address"] = kg_info["address"]
+        if not data.get("phone") and kg_info.get("phone"):
+            data["phone"] = kg_info["phone"]
+        if not data.get("website") and kg_info.get("website"):
+            data["website"] = kg_info["website"]
+
     # ── Step 4: License verification ──────────────────────────────────────────
     print("[4/5] Verifying licenses...")
     providers = data.get("providers", [])
     providers = enrich_with_licenses(providers, state)
 
     if mode == "address":
-        # Keep licensed providers; also keep vets with vet titles since AAVSB
-        # blocks automated verification — a DVM on a vet clinic's staff page is
-        # almost certainly licensed in the state where they practice.
-        def _include(p: dict) -> bool:
-            if p.get("licensed_in_target_state"):
-                return True
-            return "veterinarian" in (p.get("provider_category") or "").lower()
+        licensed_count = sum(1 for p in providers if p.get("licensed_in_target_state"))
+        print(f"      Licensed/verified in {state}: {licensed_count} / {len(providers)} providers")
+        if licensed_count < len(providers):
+            print(f"      {len(providers) - licensed_count} provider(s) shown as [NOT VERIFIED] — check state board manually")
 
-        licensed = [p for p in providers if _include(p)]
-        unlicensed_count = len(providers) - len(licensed)
-        print(f"      Licensed/verified in {state}: {len(licensed)} / {len(providers)} providers")
-        if unlicensed_count:
-            print(f"      Excluded {unlicensed_count} provider(s) with no {state} license found")
-        providers = licensed
-
-        # Secondary NPI fallback if website path produced 0 licensed providers
+        # Secondary NPI fallback if website path produced 0 providers
         if not providers and not use_npi_fallback:
-            print("      0 licensed providers after filtering — retrying with NPI Registry...")
+            print("      0 providers found — retrying with NPI Registry...")
             npi_data = lookup_npi(None, full_address, state, postal)
             if npi_data.get("providers"):
                 npi_providers = enrich_with_licenses(npi_data["providers"], state)
-                providers = [p for p in npi_providers if p.get("licensed_in_target_state")]
-                print(f"      NPI retry: {len(providers)} licensed provider(s) found")
+                providers = npi_providers
+                print(f"      NPI retry: {len(providers)} provider(s) found")
                 if providers:
                     data.update({k: v for k, v in npi_data.items() if k != "providers"})
 
